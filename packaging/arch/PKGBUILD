@@ -1,0 +1,27 @@
+# Maintainer: Dani Hegglin
+# Binary package built from the GitHub release tarballs. The release workflow
+# fills in pkgver and checksums; it can also be published to the AUR as logship-bin.
+pkgname=logship-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A blazing fast, GPU-accelerated log file explorer built on GPUI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/danihegglin/logship"
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'vulkan-icd-loader' 'fontconfig')
+provides=('logship')
+conflicts=('logship')
+options=('!strip' '!debug')
+source_x86_64=("logship-${pkgver}-x86_64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${pkgver}/logship-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("logship-${pkgver}-aarch64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${pkgver}/logship-${pkgver}-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  cd "logship-${pkgver}-${CARCH}-unknown-linux-gnu"
+  install -Dm755 logship "${pkgdir}/usr/bin/logship"
+  install -Dm644 logship.desktop "${pkgdir}/usr/share/applications/logship.desktop"
+  install -Dm644 logship.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/logship.svg"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}

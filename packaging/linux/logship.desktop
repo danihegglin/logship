@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=logship
+GenericName=Log Viewer
+Comment=GPU-accelerated log file explorer
+Exec=logship %f
+Icon=logship
+Terminal=false
+Categories=Development;Utility;
+MimeType=text/plain;text/x-log;
+Keywords=log;logs;viewer;tail;grep;

@@ -72,6 +72,23 @@ You can also open a file with ⌘O or drag one onto the window.
 
 > **macOS:** gpui is built with `runtime_shaders`, so the Metal shaders compile when the app starts and the build doesn't need Xcode's separate Metal toolchain.
 
+### Prebuilt downloads
+
+Every tagged release publishes builds from GitHub Actions (`.github/workflows/release.yml`):
+
+| Platform | Files |
+| --- | --- |
+| macOS (Apple Silicon + Intel) | `logship-*-macos-universal.dmg`, per-arch `.tar.gz` |
+| Debian, Ubuntu, Mint, Pop!_OS | `logship_*.deb` |
+| Fedora, openSUSE, RHEL | `logship-*.rpm` |
+| Arch, Manjaro, EndeavourOS | `logship-bin-*.pkg.tar.zst` (`sudo pacman -U …`), plus a `PKGBUILD` for the AUR |
+| Any Linux distro | `logship-*.AppImage`, `.tar.gz` |
+| Windows | `logship-*-pc-windows-msvc.zip` |
+
+Linux and Windows builds are available for x86_64 and aarch64. The macOS app is ad-hoc signed but not notarized, so the first time you open it, right-click it and choose **Open**.
+
+To cut a release, bump `version` in `Cargo.toml` and push a matching tag (`git tag v0.1.0 && git push origin v0.1.0`). This creates a draft release with every file attached.
+
 ## 🗺️ Keys
 
 | Key | Action |
