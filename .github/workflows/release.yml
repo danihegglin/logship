@@ -6,13 +6,13 @@ name: Release
 #            .AppImage (any distro), .pkg.tar.zst (Arch) + PKGBUILD for the AUR
 #   Windows  .zip for x86_64 and aarch64
 #
-# Pushing a tag like v0.1.0 publishes a GitHub release with every file attached.
-# Running it by hand (workflow_dispatch) only uploads workflow artifacts.
+# Only runs for version tags: pushing a tag like v0.1.0 builds every package
+# and publishes a GitHub release with them attached. Regular pushes and pull
+# requests go through ci.yml, which only builds and tests.
 
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -254,7 +254,6 @@ jobs:
 
   release:
     name: GitHub release
-    if: github.ref_type == 'tag'
     needs: [linux, arch, macos, windows]
     runs-on: ubuntu-latest
     permissions:
