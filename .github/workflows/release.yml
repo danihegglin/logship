@@ -7,8 +7,9 @@ name: Release
 #   Windows  .zip for x86_64 and aarch64
 #
 # Only runs for version tags: pushing a tag like v0.1.0 builds every package
-# and publishes a GitHub release with them attached. Regular pushes and pull
-# requests go through ci.yml, which only builds and tests.
+# and publishes a GitHub release with them attached. The tag sets the version
+# (v0.2 becomes 0.2.0), so Cargo.toml doesn't need a bump first. Regular pushes
+# and pull requests go through ci.yml, which only builds and tests.
 
 on:
   push:
@@ -28,11 +29,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: version
-        name: Read version from Cargo.toml
+        name: Read version from tag
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+          version=${GITHUB_REF_NAME#v}
+          # Pad short tags to full semver: v1 -> 1.0.0, v0.2 -> 0.2.0
+          if [[ $version =~ ^[0-9]+$ ]]; then
+            version=$version.0.0
+          elif [[ $version =~ ^[0-9]+\.[0-9]+$ ]]; then
+            version=$version.0
+          fi
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME is not a version like v1.2.3"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -72,6 +79,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deb,cargo-generate-rpm
+
+      - name: Set version from tag
+        run: packaging/set-version.sh "$VERSION"
 
       - name: Build
         run: |
@@ -130,6 +140,7 @@ jobs:
           arm=$(sha256sum "$pkg/logship-$VERSION-aarch64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)
           sed -i \
             -e "s/^pkgver=.*/pkgver=$VERSION/" \
+            -e "s/^_tag=.*/_tag=$GITHUB_REF_NAME/" \
             -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$x86')/" \
             -e "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('$arm')/" \
             "$pkg/PKGBUILD"
@@ -160,6 +171,9 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Set version from tag
+        run: packaging/set-version.sh "$VERSION"
 
       - name: Build aarch64
         run: cargo build --release --locked --target aarch64-apple-darwin
@@ -234,6 +248,10 @@ jobs:
             Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $fxc) { throw "fxc.exe not found" }
           "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+
+      - name: Set version from tag
+        shell: bash
+        run: packaging/set-version.sh "$VERSION"
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}

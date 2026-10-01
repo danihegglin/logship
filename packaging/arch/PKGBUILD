@@ -4,6 +4,7 @@
 pkgname=logship-bin
 pkgver=0.1.0
 pkgrel=1
+_tag=v${pkgver}
 pkgdesc="A blazing fast, GPU-accelerated log file explorer built on GPUI"
 arch=('x86_64' 'aarch64')
 url="https://github.com/danihegglin/logship"
@@ -12,8 +13,8 @@ depends=('glibc' 'gcc-libs' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland'
 provides=('logship')
 conflicts=('logship')
 options=('!strip' '!debug')
-source_x86_64=("logship-${pkgver}-x86_64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${pkgver}/logship-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
-source_aarch64=("logship-${pkgver}-aarch64-unknown-linux-gnu.tar.gz::${url}/releases/download/v${pkgver}/logship-${pkgver}-aarch64-unknown-linux-gnu.tar.gz")
+source_x86_64=("logship-${pkgver}-x86_64-unknown-linux-gnu.tar.gz::${url}/releases/download/${_tag}/logship-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("logship-${pkgver}-aarch64-unknown-linux-gnu.tar.gz::${url}/releases/download/${_tag}/logship-${pkgver}-aarch64-unknown-linux-gnu.tar.gz")
 sha256sums_x86_64=('SKIP')
 sha256sums_aarch64=('SKIP')
 
