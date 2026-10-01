@@ -87,7 +87,7 @@ Every tagged release publishes builds from GitHub Actions (`.github/workflows/re
 
 Linux and Windows builds are available for x86_64 and aarch64. The macOS app is ad-hoc signed but not notarized, so the first time you open it, right-click it and choose **Open**.
 
-To cut a release, bump `version` in `Cargo.toml` and push a matching tag (`git tag v0.1.0 && git push origin v0.1.0`). This creates a draft release with every file attached.
+To cut a release, bump `version` in `Cargo.toml` and push a matching tag (`git tag v0.1.0 && git push origin v0.1.0`). This publishes a GitHub release with every file attached.
 
 ## 🗺️ Keys
 
