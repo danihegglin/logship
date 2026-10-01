@@ -1,0 +1,275 @@
+name: Release
+
+# Builds logship for macOS, Linux and Windows and packages it:
+#   macOS    universal .dmg (.app bundle) + per-arch .tar.gz
+#   Linux    .tar.gz, .deb (Debian/Ubuntu), .rpm (Fedora/openSUSE/RHEL),
+#            .AppImage (any distro), .pkg.tar.zst (Arch) + PKGBUILD for the AUR
+#   Windows  .zip for x86_64 and aarch64
+#
+# Pushing a tag like v0.1.0 publishes a draft GitHub release with every file.
+# Running it by hand (workflow_dispatch) only uploads workflow artifacts.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Read version from Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            # Built on the oldest supported Ubuntu so the binary runs on older glibc.
+            runner: ubuntu-22.04
+          - arch: aarch64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libfontconfig-dev libfreetype-dev libvulkan-dev \
+            patchelf file
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      - name: Build
+        run: |
+          cargo build --release --locked
+          strip target/release/logship
+
+      - name: Package tarball
+        run: |
+          name=logship-$VERSION-${{ matrix.target }}
+          mkdir -p dist "$name"
+          cp target/release/logship LICENSE README.md \
+            packaging/linux/logship.desktop packaging/linux/logship.svg "$name/"
+          tar -czf "dist/$name.tar.gz" "$name"
+
+      - name: Package .deb
+        run: cargo deb --no-build --no-strip --output dist/
+
+      - name: Package .rpm
+        run: cargo generate-rpm --output dist/
+
+      - name: Package AppImage
+        run: packaging/linux/build-appimage.sh target/release/logship "$VERSION" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  arch:
+    name: Arch Linux package
+    needs: [version, linux]
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
+          path: linux
+          merge-multiple: true
+
+      - name: Build package with makepkg
+        run: |
+          useradd -m builder
+          pkg=/tmp/pkg
+          mkdir -p "$pkg" dist
+          cp packaging/arch/PKGBUILD "$pkg/"
+          cp linux/logship-"$VERSION"-*-unknown-linux-gnu.tar.gz "$pkg/"
+
+          # Pin the version and real checksums so the PKGBUILD can go to the AUR as is.
+          x86=$(sha256sum "$pkg/logship-$VERSION-x86_64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)
+          arm=$(sha256sum "$pkg/logship-$VERSION-aarch64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=$VERSION/" \
+            -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$x86')/" \
+            -e "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('$arm')/" \
+            "$pkg/PKGBUILD"
+
+          chown -R builder "$pkg"
+          su builder -c "cd $pkg && makepkg --nodeps --noconfirm"
+          cp "$pkg"/*.pkg.tar.zst dist/
+          cp "$pkg/PKGBUILD" dist/PKGBUILD
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal
+    needs: version
+    runs-on: macos-14
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build aarch64
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Build x86_64 (cross-compiled)
+        run: cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Package tarballs
+        run: |
+          mkdir -p dist
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            name=logship-$VERSION-$target
+            mkdir "$name"
+            cp target/$target/release/logship LICENSE README.md "$name/"
+            strip "$name/logship"
+            tar -czf "dist/$name.tar.gz" "$name"
+          done
+
+      - name: Package universal .app and .dmg
+        run: |
+          app=staging/logship.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/logship" \
+            target/aarch64-apple-darwin/release/logship \
+            target/x86_64-apple-darwin/release/logship
+          strip "$app/Contents/MacOS/logship"
+          sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          # Ad-hoc signature: Apple Silicon refuses to run unsigned code.
+          # Not notarized, so users have to right-click > Open the first time.
+          codesign --force --deep --sign - "$app"
+          ln -s /Applications staging/Applications
+          hdiutil create -volname logship -srcfolder staging -ov -format UDZO \
+            "dist/logship-$VERSION-macos-universal.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: version
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+          - arch: aarch64
+            target: aarch64-pc-windows-msvc
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # gpui compiles its HLSL shaders with fxc.exe in release builds.
+      # The shaders are bytecode, so the x64 compiler works for every target.
+      - name: Locate fxc.exe
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw "fxc.exe not found" }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $name = "logship-$env:VERSION-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $name, dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/logship.exe, LICENSE, README.md $name
+          Compress-Archive -Path $name -DestinationPath "dist/$name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    if: github.ref_type == 'tag'
+    needs: [linux, arch, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/*

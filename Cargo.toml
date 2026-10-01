@@ -20,3 +20,35 @@ panic = "abort"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Linux packages built by .github/workflows/release.yml.
+# libvulkan, libwayland-client and fontconfig are loaded at runtime, so they are
+# listed explicitly on top of what the linker sees.
+[package.metadata.deb]
+maintainer = "Dani Hegglin <dani.hegglin@gmail.com>"
+copyright = "Dani Hegglin"
+section = "utils"
+priority = "optional"
+depends = "$auto, libvulkan1, libwayland-client0, libfontconfig1"
+extended-description = "Memory-maps log files, indexes them on every core and renders with the GPU, so multi-gigabyte logs open, search and filter instantly."
+assets = [
+    ["target/release/logship", "usr/bin/", "755"],
+    ["packaging/linux/logship.desktop", "usr/share/applications/", "644"],
+    ["packaging/linux/logship.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["README.md", "usr/share/doc/logship/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+license = "MIT"
+summary = "GPU-accelerated log file explorer"
+assets = [
+    { source = "target/release/logship", dest = "/usr/bin/logship", mode = "755" },
+    { source = "packaging/linux/logship.desktop", dest = "/usr/share/applications/logship.desktop", mode = "644" },
+    { source = "packaging/linux/logship.svg", dest = "/usr/share/icons/hicolor/scalable/apps/logship.svg", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/logship/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+"libvulkan.so.1()(64bit)" = "*"
+"libwayland-client.so.0()(64bit)" = "*"
+"libfontconfig.so.1()(64bit)" = "*"
