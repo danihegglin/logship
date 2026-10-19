@@ -48,37 +48,45 @@ jobs:
     name: Linux ${{ matrix.arch }}
     needs: version
     runs-on: ${{ matrix.runner }}
+    # Built in an Ubuntu 20.04 container so the binary needs only glibc 2.31 and
+    # runs on RHEL 9, Debian 11, Ubuntu 20.04 and newer. Building on the runner's
+    # own Ubuntu 22.04 links against glibc 2.35, which RHEL 9 (2.34) can't load.
+    container: ubuntu:20.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
             target: x86_64-unknown-linux-gnu
-            # Built on the oldest supported Ubuntu so the binary runs on older glibc.
             runner: ubuntu-22.04
           - arch: aarch64
             target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      DEBIAN_FRONTEND: noninteractive
     steps:
-      - uses: actions/checkout@v4
-
+      # Before checkout, so it clones with git instead of downloading a tarball.
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl ca-certificates git \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libfontconfig-dev libfreetype-dev libvulkan-dev \
             patchelf file
 
+      - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-
-      - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deb,cargo-generate-rpm
+          key: ubuntu-20.04
+
+      # Built from source: the prebuilt cargo-deb needs a newer glibc than 2.31.
+      - name: Install cargo-deb and cargo-generate-rpm
+        run: cargo install --locked cargo-deb cargo-generate-rpm
 
       - name: Set version from tag
         run: packaging/set-version.sh "$VERSION"
