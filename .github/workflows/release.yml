@@ -67,6 +67,8 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
     steps:
       # Before checkout, so it clones with git instead of downloading a tarball.
+      # rpm gives cargo-generate-rpm rpm's own find-requires; without it the .rpm
+      # requires every library ldd lists, including Ubuntu-only ones like libbsd.
       - name: Install dependencies
         run: |
           apt-get update
@@ -74,7 +76,7 @@ jobs:
             build-essential pkg-config curl ca-certificates git \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libfontconfig-dev libfreetype-dev libvulkan-dev \
-            patchelf file
+            patchelf file rpm
 
       - uses: actions/checkout@v4
 
