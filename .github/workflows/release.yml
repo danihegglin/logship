@@ -101,7 +101,10 @@ jobs:
       - name: Set version from tag
         run: packaging/set-version.sh "$VERSION"
 
+      # zig ignores the system library directory, where libxcb and libxkbcommon are.
       - name: Build
+        env:
+          RUSTFLAGS: -L /usr/lib/${{ matrix.arch }}-linux-gnu
         run: |
           cargo zigbuild --release --locked --target ${{ matrix.target }}.2.17
           strip "$BIN"
