@@ -85,7 +85,7 @@ Every tagged release publishes builds from GitHub Actions (`.github/workflows/re
 | Any Linux distro | `logship-*.AppImage`, `.tar.gz` |
 | Windows | `logship-*-pc-windows-msvc.zip` |
 
-Linux and Windows builds are available for x86_64 and aarch64. The Linux builds need glibc 2.31 or newer (Ubuntu 20.04, Debian 11, RHEL 9 and later). The macOS app is ad-hoc signed but not notarized, so the first time you open it, right-click it and choose **Open**.
+Linux and Windows builds are available for x86_64 and aarch64. The Linux builds need glibc 2.17 or newer (RHEL/CentOS 7, Ubuntu 18.04 and later) and a Vulkan driver. The macOS app is ad-hoc signed but not notarized, so the first time you open it, right-click it and choose **Open**.
 
 To cut a release, push a version tag (`git tag v0.2.0 && git push origin v0.2.0`). The tag sets the version, so `Cargo.toml` doesn't need a bump first, and a short tag like `v0.2` becomes `0.2.0`. This publishes a GitHub release with every file attached. Regular pushes and pull requests only build and test, without packaging.
 
