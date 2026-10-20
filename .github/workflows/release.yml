@@ -121,8 +121,9 @@ jobs:
       - name: Package .deb
         run: cargo deb --no-build --no-strip --target ${{ matrix.target }} --output dist/
 
+      # xz instead of the default zstd, which rpm on RHEL/CentOS 7 can't unpack.
       - name: Package .rpm
-        run: cargo generate-rpm --target ${{ matrix.target }} --output dist/
+        run: cargo generate-rpm --target ${{ matrix.target }} --payload-compress xz --output dist/
 
       - name: Package AppImage
         run: packaging/linux/build-appimage.sh "$BIN" "$VERSION" dist
