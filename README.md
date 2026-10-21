@@ -88,9 +88,33 @@ Every tagged release publishes builds from GitHub Actions (`.github/workflows/re
 | Any Linux distro | `logship-*.AppImage`, `.tar.gz` |
 | Windows | `logship-*-pc-windows-msvc.zip` |
 
-Linux and Windows builds are available for x86_64 and aarch64. The Linux builds need glibc 2.17 or newer (RHEL/CentOS 7, Ubuntu 18.04 and later) and a Vulkan driver. The macOS app is ad-hoc signed but not notarized, so the first time you open it, right-click it and choose **Open**.
+Linux and Windows builds are available for x86_64 and aarch64. The Linux builds need glibc 2.17 or newer (RHEL/CentOS 7, Ubuntu 18.04 and later) and a Vulkan driver.
+
+**Opening the macOS app.** A release signed with the maintainer's Apple Developer ID is notarized and opens like any other app (see [Signing the macOS build](#signing-the-macos-build)). Without that it is only ad-hoc signed, and macOS blocks it the first time ("Apple could not verify…"). Since macOS 15, right-click → **Open** no longer gets past this. Instead, click **Done**, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to the message about logship, then confirm. Or, after checking the download against `SHA256SUMS.txt`, clear the quarantine flag in Terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/logship.app
+```
 
 Every push to `main` is released automatically as the next patch version (`.github/workflows/auto-tag.yml`): if the newest tag is `v0.2.1`, the push is tagged `v0.2.2` and a GitHub release with every file attached is published. Put `[skip ci]` in the commit message to push without releasing. If a push to `main` didn't start a release (GitHub occasionally drops the event), open the **Auto tag** workflow in the Actions tab and click **Run workflow** on `main`. For a new minor or major version, push a tag yourself (`git tag v0.3.0 && git push origin v0.3.0`); later pushes continue from it (`v0.3.1`, …). The tag sets the version, so `Cargo.toml` doesn't need a bump first, and a short tag like `v0.2` becomes `0.2.0`. Pull requests only build and test, without packaging.
+
+### Signing the macOS build
+
+Signing and notarizing need a membership in the paid [Apple Developer Program](https://developer.apple.com/programs/). With it:
+
+1. Create a **Developer ID Application** certificate (Xcode → Settings → Accounts → Manage Certificates → +, or on developer.apple.com) and export it from Keychain Access, with its private key, as a `.p12` file with a password.
+2. In App Store Connect, open **Users and Access → Integrations → App Store Connect API** and create a team key with the **Developer** role. Download the `.p8` file (it can only be downloaded once) and note the key ID and the issuer ID.
+3. Add these repository secrets (**Settings → Secrets and variables → Actions**):
+
+| Secret | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE` | the `.p12`, base64-encoded: `base64 -i certificate.p12 \| pbcopy` |
+| `MACOS_CERTIFICATE_PASSWORD` | the `.p12`'s password |
+| `APPLE_API_KEY` | the contents of the `.p8` file: `pbcopy < AuthKey_XXXXXXXXXX.p8` |
+| `APPLE_API_KEY_ID` | the key ID |
+| `APPLE_API_ISSUER_ID` | the issuer ID |
+
+From the next release on, the app, the dmg and the binaries in the tarballs are signed with the hardened runtime and notarized, and the app and the dmg have the notarization ticket stapled (`packaging/macos/package.sh`). If only some of the secrets are set, the release fails rather than shipping an unsigned build.
 
 ## 🗺️ Keys
 

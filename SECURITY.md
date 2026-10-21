@@ -55,8 +55,9 @@ Usually out of scope:
   about 9 bytes per line, so a 100M-line file needs roughly 900 MB
 - crashes caused by another process truncating or rewriting the file while
   logship has it mapped, unless it leads to something more than the crash
-- the missing notarization of the macOS app and the unsigned Windows build,
-  which are known (see "Verifying downloads" below)
+- macOS builds that aren't notarized (only releases signed with the
+  maintainer's Developer ID are) and the unsigned Windows build, which are
+  known (see "Verifying downloads" below)
 - vulnerabilities in dependencies with no impact on logship; please report
   those to the dependency's maintainers
 
@@ -73,5 +74,8 @@ Get-FileHash logship-*.zip          # Windows (PowerShell)
 ```
 
 Releases are built only by the GitHub Actions workflows in
-`.github/workflows/`, from the tagged commit. The macOS app is ad-hoc signed
-but not notarized, and the Windows build is not code-signed.
+`.github/workflows/`, from the tagged commit. The Windows build is not
+code-signed. The macOS app is notarized when the release was signed with the
+maintainer's Developer ID; `spctl --assess --verbose /Applications/logship.app`
+then says `accepted` and names the developer. Otherwise it is only ad-hoc
+signed.
