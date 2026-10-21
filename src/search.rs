@@ -129,6 +129,7 @@ fn filter_regex(index: &LogIndex, range: Range<usize>, re: &Regex, mask: u8) -> 
 mod tests {
     use super::*;
     use crate::index::Level;
+    use std::io::Write;
 
     struct Rng(u64);
 
@@ -176,9 +177,11 @@ mod tests {
             std::fs::write(&path, &data).unwrap();
             let mut idx = LogIndex::open(&path, &AtomicU64::new(0)).unwrap();
             for _ in 0..rng.below(3) {
+                // Appended, not rewritten: Windows can't truncate a mapped file.
                 let more = make(&mut rng);
                 data.extend_from_slice(&more);
-                std::fs::write(&path, &data).unwrap();
+                let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+                file.write_all(&more).unwrap();
                 if let Some(delta) = idx.scan_append().unwrap() {
                     idx.apply(delta);
                 }
