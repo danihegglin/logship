@@ -120,6 +120,7 @@ mod tests {
                 font_family: "Hack".into(),
                 font_size: 14.,
                 dark: false,
+                newest_first: true,
             },
             tabs: vec!["/var/log/a.log".into(), "/var/log/b.log".into()],
             active: 1,

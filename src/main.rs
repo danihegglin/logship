@@ -16,8 +16,9 @@ use gpui::{
 
 use session::{RecentFiles, Session};
 use view::{
-    CloseTab, Copy, FocusSearch, NewTab, NextMatch, NextTab, Open, OpenSettings, PrevMatch, PrevTab,
-    Quit, SelectAll, ToggleCase, ToggleFilterMode, ToggleFollow, ToggleRegex, ToggleTheme,
+    CloseTab, Copy, FocusSearch, NewTab, NextMatch, NextTab, Open, OpenSettings, PrevMatch,
+    PrevTab, Quit, SelectAll, ToggleCase, ToggleFilterMode, ToggleFollow, ToggleNewestFirst,
+    ToggleRegex, ToggleTheme,
 };
 use workspace::Workspace;
 
@@ -47,6 +48,7 @@ fn main() {
             KeyBinding::new("secondary-shift-g", PrevMatch, None),
             KeyBinding::new("secondary-shift-d", ToggleTheme, None),
             KeyBinding::new("secondary-shift-f", ToggleFollow, None),
+            KeyBinding::new("secondary-shift-r", ToggleNewestFirst, None),
             KeyBinding::new("secondary-alt-c", ToggleCase, None),
             KeyBinding::new("secondary-alt-r", ToggleRegex, None),
             KeyBinding::new("secondary-alt-f", ToggleFilterMode, None),
@@ -89,6 +91,7 @@ fn main() {
                 name: "View".into(),
                 items: vec![
                     MenuItem::action("Follow Tail", ToggleFollow),
+                    MenuItem::action("Newest First", ToggleNewestFirst),
                     MenuItem::action("Toggle Light / Dark", ToggleTheme),
                     MenuItem::separator(),
                     MenuItem::action("Next Tab", NextTab),

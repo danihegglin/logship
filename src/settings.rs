@@ -53,6 +53,8 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub dark: bool,
+    /// Show the newest lines at the top instead of the bottom.
+    pub newest_first: bool,
 }
 
 impl Default for Settings {
@@ -61,6 +63,7 @@ impl Default for Settings {
             font_family: BUNDLED_FONT.into(),
             font_size: 12.5,
             dark: true,
+            newest_first: false,
         }
     }
 }
@@ -134,6 +137,7 @@ mod tests {
             font_family: " ".into(),
             font_size: 300.,
             dark: false,
+            newest_first: true,
         }
         .sanitized();
         assert_eq!(s.font_family, BUNDLED_FONT);

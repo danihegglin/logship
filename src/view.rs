@@ -45,6 +45,7 @@ actions!(
         FocusSearch,
         ToggleTheme,
         ToggleFollow,
+        ToggleNewestFirst,
         ToggleCase,
         ToggleRegex,
         ToggleFilterMode,
@@ -180,6 +181,8 @@ pub struct LogView {
     h_offset: f32,
     selected: Option<usize>,
     follow: bool,
+    /// Newest lines at the top: display row 0 shows the last row in file order.
+    reversed: bool,
     char_w: f32,
     font_family: SharedString,
     font_size: f32,
@@ -237,6 +240,7 @@ impl LogView {
             h_offset: 0.,
             selected: None,
             follow: false,
+            reversed: false,
             char_w: 0.,
             font_family: SharedString::default(),
             font_size: 0.,
@@ -272,19 +276,35 @@ impl LogView {
     /// Picks up font changes from the settings.
     fn sync_settings(&mut self, window: &Window, cx: &App) {
         let s = cx.global::<Settings>();
-        if self.char_w > 0. && self.font_family.as_ref() == s.font_family && self.font_size == s.font_size {
-            return;
+        let newest_first = s.newest_first;
+        if self.char_w == 0. || self.font_family.as_ref() != s.font_family || self.font_size != s.font_size {
+            self.font_family = s.font_family.clone().into();
+            self.font_size = s.font_size;
+            self.line_h = s.line_height();
+            let text = window.text_system();
+            let id = text.resolve_font(&font(self.font_family.clone()));
+            self.char_w = text
+                .advance(id, px(self.font_size), 'm')
+                .map(|s| f32::from(s.width))
+                .unwrap_or(self.font_size * 0.6);
+            self.clamp_scroll();
         }
-        self.font_family = s.font_family.clone().into();
-        self.font_size = s.font_size;
-        self.line_h = s.line_height();
-        let text = window.text_system();
-        let id = text.resolve_font(&font(self.font_family.clone()));
-        self.char_w = text
-            .advance(id, px(self.font_size), 'm')
-            .map(|s| f32::from(s.width))
-            .unwrap_or(self.font_size * 0.6);
-        self.clamp_scroll();
+        if newest_first != self.reversed {
+            self.set_reversed(newest_first);
+        }
+    }
+
+    /// Flips the row order, keeping the selected line (or the one in the middle of
+    /// the view) in view, or the newest lines when following.
+    fn set_reversed(&mut self, reversed: bool) {
+        let middle = (self.top_row + self.page() / 2).min(self.row_count().saturating_sub(1));
+        let anchor = self.selected.or_else(|| self.row_to_line(middle));
+        self.reversed = reversed;
+        if self.follow {
+            self.scroll_to_latest();
+        } else if let Some(line) = anchor {
+            self.scroll_to_row_centered(self.line_to_row(line));
+        }
     }
 
     // ---------------------------------------------------------------- loading
@@ -361,11 +381,21 @@ impl LogView {
         self.hits = Arc::default();
         self.refilter(cx);
         if self.follow {
-            self.scroll_to_bottom();
+            self.scroll_to_latest();
         }
         self.clamp_scroll();
         self.recompute_markers(cx);
         self.start_watch(cx);
+    }
+
+    /// When showing newest first and not following, appended lines push the rows
+    /// down; shift the view by the same amount so the lines being read stay put.
+    fn keep_view_on_append(&mut self, rows_before: usize) {
+        if self.reversed && !self.follow {
+            let added = self.row_count() as isize - rows_before as isize;
+            self.top_row = (self.top_row as isize + added).max(0) as usize;
+            self.clamp_scroll();
+        }
     }
 
     /// Polls the file for appended data (live tail) and keeps derived state fresh.
@@ -417,6 +447,10 @@ impl LogView {
             return;
         };
         let from = delta.first_line();
+        let rows_before = match &self.rows {
+            Some(rows) => rows.len(),
+            None => index.line_count(),
+        };
         Arc::make_mut(index).apply(delta);
         let count = index.line_count();
 
@@ -437,8 +471,9 @@ impl LogView {
             }
             self.spawn_filter(from..count, true, cx);
         }
+        self.keep_view_on_append(rows_before);
         if self.follow {
-            self.scroll_to_bottom();
+            self.scroll_to_latest();
         }
         self.markers_dirty = true;
         cx.notify();
@@ -568,6 +603,7 @@ impl LogView {
         let rows_are_hits = self.filter_mode && self.regex.is_some();
         let needs_rows = self.rows_needed();
         if append {
+            let rows_before = self.row_count();
             if rows_are_hits {
                 self.rows = None;
             }
@@ -579,8 +615,9 @@ impl LogView {
             } else if let (Some(new), Some(rows)) = (rows, &mut self.rows) {
                 Arc::make_mut(rows).extend_from_slice(&new);
             }
+            self.keep_view_on_append(rows_before);
             if self.follow {
-                self.scroll_to_bottom();
+                self.scroll_to_latest();
             }
         } else {
             self.hits = Arc::new(hits.unwrap_or_default());
@@ -601,7 +638,7 @@ impl LogView {
     /// Keeps the selected line in view after the row mapping changed.
     fn restore_anchor(&mut self) {
         if self.follow {
-            self.scroll_to_bottom();
+            self.scroll_to_latest();
             return;
         }
         if let Some(line) = self.selected {
@@ -647,20 +684,25 @@ impl LogView {
         }
     }
 
+    /// The line shown on display row `row`.
     fn row_to_line(&self, row: usize) -> Option<usize> {
+        let row = flip_row(row, self.row_count(), self.reversed)?;
         match &self.rows {
             Some(rows) => rows.get(row).copied(),
-            None => (row < self.row_count()).then_some(row),
+            None => Some(row),
         }
     }
 
-    /// The row showing `line`, or the next row after it if the line is filtered out.
+    /// The display row showing `line`, or the row of the next line in the file if
+    /// `line` is filtered out.
     fn line_to_row(&self, line: usize) -> usize {
-        match &self.rows {
+        let count = self.row_count();
+        let row = match &self.rows {
             Some(rows) => rows.partition_point(|&l| l < line),
             None => line,
         }
-        .min(self.row_count().saturating_sub(1))
+        .min(count.saturating_sub(1));
+        flip_row(row, count, self.reversed).unwrap_or(0)
     }
 
     fn list_height(&self, window: &Window) -> f32 {
@@ -705,6 +747,16 @@ impl LogView {
         self.sub_px = 0.;
     }
 
+    /// Scrolls to the newest lines: the bottom, or the top when showing newest first.
+    fn scroll_to_latest(&mut self) {
+        if self.reversed {
+            self.top_row = 0;
+            self.sub_px = 0.;
+        } else {
+            self.scroll_to_bottom();
+        }
+    }
+
     fn scroll_to_row_centered(&mut self, row: usize) {
         let half = self.page() / 2;
         self.top_row = row.saturating_sub(half).min(self.max_top());
@@ -735,7 +787,8 @@ impl LogView {
         let row = (current as isize + delta).clamp(0, count as isize - 1) as usize;
         self.selected = self.row_to_line(row);
         self.ensure_row_visible(row);
-        self.follow = self.follow && row + 1 == count;
+        let at_latest = if self.reversed { row == 0 } else { row + 1 == count };
+        self.follow = self.follow && at_latest;
     }
 
     fn select_row(&mut self, row: usize) {
@@ -746,6 +799,8 @@ impl LogView {
     }
 
     fn jump_to_hit(&mut self, forward: bool) {
+        // "Next" always moves down the screen.
+        let forward = forward != self.reversed;
         let hits = self.hits.clone();
         if hits.is_empty() {
             return;
@@ -779,10 +834,11 @@ impl LogView {
     // ---------------------------------------------------------------- text selection
 
     /// The selection as (start, end), if it covers any text.
+    /// The selection as (first, last) in screen order, if it covers any text.
     fn selection_range(&self) -> Option<(TextPos, TextPos)> {
         let (a, b) = self.selection?;
-        let (start, end) = if a <= b { (a, b) } else { (b, a) };
-        (start != end).then_some((start, end))
+        let (first, last) = if before(b, a, self.reversed) { (b, a) } else { (a, b) };
+        (first != last).then_some((first, last))
     }
 
     /// The row character under `pos` (window coordinates). Positions above or below
@@ -894,10 +950,12 @@ impl LogView {
             DragUnit::Word => Self::word_at(&hit),
             DragUnit::Line => self.line_at(hit.line),
         };
+        let rev = self.reversed;
         self.selection = Some(match unit {
             DragUnit::Char => (self.selection.map_or(start, |(anchor, _)| anchor), start),
-            _ if start < o_start => (o_end, start),
-            _ => (o_start, end.max(o_end)),
+            _ if before(start, o_start, rev) => (o_end, start),
+            _ if before(end, o_end, rev) => (o_start, o_end),
+            _ => (o_start, end),
         });
     }
 
@@ -975,21 +1033,22 @@ impl LogView {
     }
 
     /// The selected text as it is in the file, without terminal escape sequences
-    /// or other control characters (tabs are kept). Lines hidden by a filter are
-    /// left out. Returns the text, the number of lines and whether it was cut at
-    /// `MAX_COPY`.
+    /// or other control characters (tabs are kept), in the order shown. Lines
+    /// hidden by a filter are left out. Returns the text, the number of lines and
+    /// whether it was cut at `MAX_COPY`.
     fn selected_text(&self) -> Option<(String, usize, bool)> {
         let (start, end) = self.selection_range()?;
         let index = self.index.as_ref()?;
+        let rev = self.reversed;
         let mut out = String::new();
         let mut lines = 0;
         let mut row = self.line_to_row(start.line);
         while let Some(line) = self.row_to_line(row) {
             row += 1;
-            if line < start.line {
+            if line_before(line, start.line, rev) {
                 continue;
             }
-            if line > end.line {
+            if line_before(end.line, line, rev) {
                 break;
             }
             let bytes = index.line(line);
@@ -1056,10 +1115,11 @@ impl LogView {
             ("pageup", _) | ("space", true) | ("b", false) => self.move_selection(-page),
             ("pagedown", _) | ("space", false) => self.move_selection(page),
             ("home", _) | ("g", false) => {
-                self.follow = false;
+                self.follow = self.follow && self.reversed;
                 self.select_row(0);
             }
             ("end", _) | ("g", true) => {
+                self.follow = self.follow && !self.reversed;
                 self.select_row(self.row_count().saturating_sub(1));
                 self.scroll_to_bottom();
             }
@@ -1141,7 +1201,8 @@ impl LogView {
             dx = dy;
         } else if dy != 0. {
             self.set_scroll_offset(self.scroll_offset() - dy as f64);
-            if dy > 0. {
+            // Scrolling away from the newest lines stops following.
+            if (dy > 0.) != self.reversed {
                 self.follow = false;
             }
         }
@@ -1154,7 +1215,7 @@ impl LogView {
     fn toggle_follow(&mut self) {
         self.follow = !self.follow;
         if self.follow {
-            self.scroll_to_bottom();
+            self.scroll_to_latest();
         }
     }
 
@@ -1231,7 +1292,7 @@ impl LogView {
         }
 
         if let Some((start, end)) = self.selection_range()
-            && (start.line..=end.line).contains(&line)
+            && (start.line.min(end.line)..=start.line.max(end.line)).contains(&line)
         {
             let from = if line == start.line { display.display_offset(start.byte) } else { 0 };
             let to = if line == end.line { display.display_offset(end.byte) } else { text.len() };
@@ -1293,6 +1354,7 @@ impl LogView {
             (self.scroll_offset() / (max_top as f64 * self.line_h as f64)) as f32
         };
         let markers = self.markers.clone();
+        let reversed = self.reversed;
         let entity = cx.entity();
         let grab = self.thumb_grab;
         let (track, thumb_color, hit_color, warn_color, error_color) = (
@@ -1315,6 +1377,8 @@ impl LogView {
                 let mut by_px = vec![0u8; track_h.max(1.) as usize + 1];
                 for (i, &flag) in markers.iter().enumerate() {
                     if flag != 0 {
+                        // Markers are in file order; newest first shows them upside down.
+                        let i = if reversed { MARKER_BUCKETS - 1 - i } else { i };
                         by_px[(i as f32 / MARKER_BUCKETS as f32 * track_h) as usize] |= flag;
                     }
                 }
@@ -1366,7 +1430,7 @@ impl LogView {
                     let f = ((y - f32::from(top) - grab) / travel).clamp(0., 1.) as f64;
                     let max = this.max_top() as f64 * this.line_h as f64;
                     this.set_scroll_offset(f * max);
-                    this.follow = f >= 1.;
+                    this.follow = if this.reversed { f <= 0. } else { f >= 1. };
                 };
 
                 window.on_mouse_event({
@@ -1683,6 +1747,13 @@ impl LogView {
             .child(levels)
             .child(div().flex_1())
             .child(
+                chip("newest-first", self.reversed, t)
+                    .child(if self.reversed { "● Newest first" } else { "○ Newest first" })
+                    .on_click(|_: &ClickEvent, window, cx| {
+                        window.dispatch_action(Box::new(ToggleNewestFirst), cx)
+                    }),
+            )
+            .child(
                 chip("follow", self.follow, t)
                     .child(if self.follow { "● Follow" } else { "○ Follow" })
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1937,6 +2008,25 @@ fn level_short(level: Level) -> &'static str {
         Level::Debug => "DBG",
         Level::Trace => "TRC",
         Level::None => "—",
+    }
+}
+
+/// Maps a display row to a row in file order (the mapping is its own inverse).
+fn flip_row(row: usize, count: usize, reversed: bool) -> Option<usize> {
+    (row < count).then(|| if reversed { count - 1 - row } else { row })
+}
+
+/// Whether `a` is shown above `b`.
+fn line_before(a: usize, b: usize, reversed: bool) -> bool {
+    if reversed { a > b } else { a < b }
+}
+
+/// Whether text position `a` comes before `b` on screen.
+fn before(a: TextPos, b: TextPos, reversed: bool) -> bool {
+    if a.line == b.line {
+        a.byte < b.byte
+    } else {
+        line_before(a.line, b.line, reversed)
     }
 }
 
@@ -2292,6 +2382,23 @@ mod tests {
         assert_eq!(copied(&[b'o', 0xff, b'k']), "o\u{fffd}k");
         let long = vec![b'y'; MAX_COLS * 5];
         assert_eq!(copied(&long).len(), long.len());
+    }
+
+    #[test]
+    fn newest_first_flips_rows_and_screen_order() {
+        assert_eq!(flip_row(0, 5, false), Some(0));
+        assert_eq!(flip_row(0, 5, true), Some(4));
+        assert_eq!(flip_row(4, 5, true), Some(0));
+        assert_eq!(flip_row(5, 5, true), None);
+        assert_eq!(flip_row(0, 0, true), None);
+
+        let p = |line, byte| TextPos { line, byte };
+        // Oldest first: earlier lines come first.
+        assert!(before(p(1, 9), p(2, 0), false));
+        // Newest first: later lines come first, bytes within a line keep their order.
+        assert!(before(p(2, 0), p(1, 9), true));
+        assert!(before(p(2, 3), p(2, 7), true));
+        assert!(!before(p(2, 7), p(2, 3), true));
     }
 
     #[test]

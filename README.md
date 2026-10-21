@@ -57,7 +57,8 @@ Check these numbers against your own logs with `cargo run --release --example be
 - **Filter or Highlight.** Filter mode shows only matching lines. Highlight mode keeps every line and lets you jump between matches with `n` / `N`.
 - **Level detection.** Recognizes `ERROR` `WARN` `INFO` `DEBUG` `TRACE`, as well as `level=error`, `"level":"warn"` and `[info]`. Lines get a colored stripe, and the toolbar chips show counts and filter by level.
 - **Scrollbar overview.** The scrollbar marks where errors, warnings and matches are in the file.
-- **Live tail.** Appended lines are indexed as they arrive, and Follow mode keeps the view at the bottom. If the file is truncated or rotated, it is reopened.
+- **Live tail.** Appended lines are indexed as they arrive, and Follow mode keeps the view on the newest lines. If the file is truncated or rotated, it is reopened.
+- **Newest first.** Flip the order so the latest lines are at the top (next to Follow, or ⇧⌘R). Follow then stays at the top, and when you've scrolled away new lines arrive without moving what you're reading. The choice is remembered.
 - **Line cleanup.** ANSI color codes are stripped, tabs are expanded, invalid UTF-8 is shown safely, and very long lines are cut off before drawing.
 - **Exact copy.** Select text with the mouse, character by character, by word (double-click) or by line (triple-click), across as many lines as you like; dragging past the edge scrolls. Copying gives the text exactly as it is in the file, tabs included and long lines not cut short, minus the color codes and invisible control characters, so a pasted log line can't run anything hidden in it. With a filter on, only the lines you see are copied. On Linux the selection is also pasteable with the middle button.
 - **Tabs.** Open several logs side by side. Open tabs and recently opened files are remembered and come back on the next start.
@@ -113,6 +114,7 @@ On Linux and Windows, use Ctrl where the table says ⌘.
 | ⌘C | Copy the selection, or the selected line if nothing is selected |
 | ⌘A | Select all shown lines |
 | `F`, ⇧⌘F | Follow the tail |
+| ⇧⌘R | Newest first / oldest first |
 | ⌥⌘C / ⌥⌘R / ⌥⌘F | Case-sensitive / regex / filter vs. highlight |
 | ⌥-click a level chip | Show only that level |
 | ⇧⌘D | Light / dark |
