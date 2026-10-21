@@ -1,11 +1,11 @@
 name: Auto tag
 
-# Every push to main is released as the next minor version: if the newest tag
-# is v0.2.1, the push is tagged v0.3.0 and released.
+# Every push to main is released as the next patch version: if the newest tag
+# is v0.2.1, the push is tagged v0.2.2 and released.
 #
 # A tag pushed with the workflow's GITHUB_TOKEN doesn't trigger other
 # workflows, so this calls release.yml itself instead of relying on its tag
-# trigger. Pushing a tag by hand (for example a major or patch version) still
+# trigger. Pushing a tag by hand (for example a new minor or major version) still
 # releases through release.yml as before. Put [skip ci] in a commit message to
 # push to main without releasing.
 
@@ -35,7 +35,7 @@ jobs:
           fetch-tags: true
 
       - id: tag
-        name: Tag the next minor version
+        name: Tag the next patch version
         run: |
           if git tag --points-at "$GITHUB_SHA" | grep -q '^v'; then
             echo "$GITHUB_SHA is already tagged, nothing to do"

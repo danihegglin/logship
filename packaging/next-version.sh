@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Prints the tag for the next minor release: the newest v* tag with its minor
-# version bumped and patch reset (v0.2.1 -> v0.3.0), or v0.1.0 if there is none.
+# Prints the tag for the next patch release: the newest v* tag with its patch
+# version bumped (v0.2.1 -> v0.2.2), or v0.1.0 if there is none.
 # Short tags count as padded (v0.2 is 0.2.0); tags that aren't versions are ignored.
 set -euo pipefail
 
@@ -13,5 +13,5 @@ if [[ -z $latest ]]; then
   exit 0
 fi
 
-IFS=. read -r major minor _ <<< "$latest"
-echo "v$major.$(( ${minor:-0} + 1 )).0"
+IFS=. read -r major minor patch <<< "$latest"
+echo "v$major.${minor:-0}.$(( ${patch:-0} + 1 ))"
