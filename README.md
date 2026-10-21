@@ -141,6 +141,10 @@ scripts/gen-log.py big.log --lines 5000000   # a big file
 scripts/gen-log.py big.log --live            # keep appending, to try Follow mode
 ```
 
+## 🛡️ Security
+
+Please report vulnerabilities privately, not in public issues. See [SECURITY.md](SECURITY.md) for how, and for how to verify downloads.
+
 ## 📜 License
 
 MIT. See [LICENSE](LICENSE).
