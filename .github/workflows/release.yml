@@ -21,6 +21,19 @@ on:
         description: Tag to release, already pushed and pointing at the commit being built
         required: true
         type: string
+    # Optional: with these the macOS build is signed and notarized
+    # (see packaging/macos/package.sh).
+    secrets:
+      MACOS_CERTIFICATE:
+        required: false
+      MACOS_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_API_KEY:
+        required: false
+      APPLE_API_KEY_ID:
+        required: false
+      APPLE_API_ISSUER_ID:
+        required: false
 
 permissions:
   contents: read
@@ -213,33 +226,16 @@ jobs:
       - name: Build x86_64 (cross-compiled)
         run: cargo build --release --locked --target x86_64-apple-darwin
 
-      - name: Package tarballs
-        run: |
-          mkdir -p dist
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            name=logship-$VERSION-$target
-            mkdir "$name"
-            cp target/$target/release/logship LICENSE README.md assets/fonts/LICENSE-NordwandMono.txt "$name/"
-            strip "$name/logship"
-            tar -czf "dist/$name.tar.gz" "$name"
-          done
-
-      - name: Package universal .app and .dmg
-        run: |
-          app=staging/logship.app
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          lipo -create -output "$app/Contents/MacOS/logship" \
-            target/aarch64-apple-darwin/release/logship \
-            target/x86_64-apple-darwin/release/logship
-          strip "$app/Contents/MacOS/logship"
-          sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
-          cp LICENSE assets/fonts/LICENSE-NordwandMono.txt "$app/Contents/Resources/"
-          # Ad-hoc signature: Apple Silicon refuses to run unsigned code.
-          # Not notarized, so users have to right-click > Open the first time.
-          codesign --force --deep --sign - "$app"
-          ln -s /Applications staging/Applications
-          hdiutil create -volname logship -srcfolder staging -ov -format UDZO \
-            "dist/logship-$VERSION-macos-universal.dmg"
+      # Signed with the Developer ID and notarized when the secrets are set,
+      # otherwise signed ad hoc (see the script).
+      - name: Package tarballs, universal .app and .dmg
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: packaging/macos/package.sh "$VERSION"
 
       - uses: actions/upload-artifact@v4
         with:
