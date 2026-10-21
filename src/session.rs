@@ -72,12 +72,52 @@ pub fn push_recent(recent: &mut Vec<PathBuf>, path: &Path) {
     recent.truncate(MAX_RECENT);
 }
 
+/// Writes the session readable by the user only (it lists the files they
+/// opened), through a temporary file named after the process so two running
+/// instances can't write into the same one.
 fn write_atomically(path: &Path, session: &Session) -> std::io::Result<()> {
     let dir = path.parent().expect("session path has a parent");
-    std::fs::create_dir_all(dir)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(session)?)?;
-    std::fs::rename(&tmp, path)
+    create_private_dir(dir)?;
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let written = write_private(&tmp, &serde_json::to_vec_pretty(session)?)
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+#[cfg(unix)]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    // A leftover file would keep its old permissions, so start from scratch;
+    // `create_new` also refuses to follow a symlink planted at `path`.
+    let _ = std::fs::remove_file(path);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
 }
 
 fn session_path() -> Option<PathBuf> {
@@ -139,6 +179,37 @@ mod tests {
         );
 
         assert!(Session::from_json(b"not json").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saves_readable_by_the_user_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("logship-session-{}", std::process::id()));
+        let path = dir.join("logship").join("session.json");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        write_atomically(&path, &Session::default()).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+
+        // An existing file shared with others is replaced by a private one.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let session = Session {
+            active: 3,
+            ..Session::default()
+        };
+        write_atomically(&path, &session).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(
+            Session::from_json(&std::fs::read(&path).unwrap()).unwrap(),
+            session
+        );
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

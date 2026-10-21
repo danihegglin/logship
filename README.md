@@ -53,14 +53,14 @@ Check these numbers against your own logs with `cargo run --release --example be
 
 - **Memory-mapped, parallel indexing.** `memchr` and `rayon` build a line index and detect each line's level in one pass. The file is never copied into memory.
 - **Scrolling without limits.** Only the rows on screen are built each frame. The scroll position is stored as a line number plus a pixel offset, so scrolling stays pixel-precise even at line 400,000,000.
-- **Search as you type.** Literal or regex, case-sensitive or not. The regex runs over large slices of the file at once, is debounced, and is cancelled when you keep typing.
+- **Search as you type.** Literal or regex, case-sensitive or not. A line matches when the pattern matches within that line, as with grep. The regex runs over large slices of the file at once, in time proportional to the file size whatever the pattern, is debounced, and is cancelled when you keep typing.
 - **Filter or Highlight.** Filter mode shows only matching lines. Highlight mode keeps every line and lets you jump between matches with `n` / `N`.
 - **Level detection.** Recognizes `ERROR` `WARN` `INFO` `DEBUG` `TRACE`, as well as `level=error`, `"level":"warn"` and `[info]`. Lines get a colored stripe, and the toolbar chips show counts and filter by level.
 - **Scrollbar overview.** The scrollbar marks where errors, warnings and matches are in the file.
 - **Live tail.** Appended lines are indexed as they arrive, and Follow mode keeps the view on the newest lines. If the file is truncated or rotated, it is reopened.
 - **Newest first.** Flip the order so the latest lines are at the top (next to Follow, or ⇧⌘R). Follow then stays at the top, and when you've scrolled away new lines arrive without moving what you're reading. The choice is remembered.
 - **Line cleanup.** ANSI color codes are stripped, tabs are expanded, invalid UTF-8 is shown safely, and very long lines are cut off before drawing.
-- **Exact copy.** Select text with the mouse, character by character, by word (double-click) or by line (triple-click), across as many lines as you like; dragging past the edge scrolls. Copying gives the text exactly as it is in the file, tabs included and long lines not cut short, minus the color codes and invisible control characters, so a pasted log line can't run anything hidden in it. With a filter on, only the lines you see are copied. On Linux the selection is also pasteable with the middle button.
+- **Exact copy.** Select text with the mouse, character by character, by word (double-click) or by line (triple-click), across as many lines as you like; dragging past the edge scrolls. Copying gives the text exactly as it is in the file, tabs included and long lines not cut short, minus the color codes and invisible control characters, so a pasted log line can't run anything hidden in it. With a filter on, only the lines you see are copied. A single copy takes at most 64 MB. On Linux the selection is also pasteable with the middle button.
 - **Tabs.** Open several logs side by side. Open tabs and recently opened files are remembered and come back on the next start.
 - **Settings** (⚙ or ⌘,). Pick the font and size and a dark or light theme. [Nordwand Mono](https://github.com/tywr/Nordwand-Mono) is built in and the default; installed monospace fonts like JetBrains Mono or Fira Code are offered too.
 

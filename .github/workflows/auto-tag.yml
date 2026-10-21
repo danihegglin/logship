@@ -28,6 +28,9 @@ permissions:
 
 jobs:
   tag:
+    # "Run workflow" lets anyone with write access pick a branch; only main
+    # is ever released.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
