@@ -25,6 +25,7 @@ use rayon::prelude::*;
 use regex::bytes::Regex;
 
 use crate::{
+    decorations,
     index::{ALL_LEVELS, Level, LogIndex, detect_level},
     search,
     theme::Theme,
@@ -131,6 +132,8 @@ pub struct LogView {
     list_focus: FocusHandle,
     search_focus: FocusHandle,
     title: String,
+    /// Set while the left button is held on the client-side title bar.
+    pub(crate) titlebar_drag: bool,
     _watch: Option<Task<()>>,
 }
 
@@ -170,6 +173,7 @@ impl LogView {
             list_focus: cx.focus_handle(),
             search_focus: cx.focus_handle(),
             title: String::new(),
+            titlebar_drag: false,
             _watch: None,
         }
     }
@@ -551,7 +555,8 @@ impl LogView {
     }
 
     fn list_height(window: &Window) -> f32 {
-        (f32::from(window.viewport_size().height) - HEADER_H - STATUS_H).max(LINE_HEIGHT)
+        let chrome = HEADER_H + STATUS_H + decorations::chrome_height(window);
+        (f32::from(window.viewport_size().height) - chrome).max(LINE_HEIGHT)
     }
 
     fn visible_rows(&self, window: &Window) -> usize {
@@ -1420,6 +1425,7 @@ impl Render for LogView {
             self.title = title;
         }
 
+        let title_bar = decorations::title_bar(&self.title, window, &t, cx);
         let header = self.render_header(window, &t, cx);
         let status = self.render_status(&t);
         let body = if self.index.is_some() && self.loading.is_none() {
@@ -1428,7 +1434,7 @@ impl Render for LogView {
             self.render_placeholder(&t).into_any_element()
         };
 
-        div()
+        let root = div()
             .id("root")
             .key_context("LogView")
             .size_full()
@@ -1481,9 +1487,11 @@ impl Render for LogView {
                 let accent = t.accent;
                 move |style, _, _, _| style.border_2().border_color(accent)
             })
+            .children(title_bar)
             .child(header)
             .child(body)
-            .child(status)
+            .child(status);
+        decorations::frame(window, &t, root)
     }
 }
 

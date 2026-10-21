@@ -116,6 +116,7 @@ To cut a release, push a version tag (`git tag v0.2.0 && git push origin v0.2.0`
  ├── search.rs   chunked parallel regex filter with generation-based cancellation
  ├── view.rs     GPUI view: virtualized rows, custom scrollbar + minimap, input
  ├── theme.rs    dark (default) and light palettes
+ ├── decorations.rs  own title bar where the desktop draws none (GNOME on Wayland)
  └── main.rs     app, menus, key bindings
 ```
 

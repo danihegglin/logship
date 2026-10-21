@@ -2983,6 +2983,7 @@ dependencies = [
  "memmap2",
  "rayon",
  "regex",
+ "wayland-client",
 ]
 
 [[package]]
