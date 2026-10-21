@@ -1,3 +1,4 @@
+mod decorations;
 mod index;
 mod search;
 mod theme;
@@ -75,6 +76,7 @@ fn main() {
                         ..Default::default()
                     }),
                     focus: true,
+                    window_decorations: Some(decorations::preferred()),
                     ..Default::default()
                 },
                 |window, cx| {
