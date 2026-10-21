@@ -7,19 +7,28 @@ name: Release
 #   Windows  .zip for x86_64 and aarch64
 #
 # Only runs for version tags: pushing a tag like v0.1.0 builds every package
-# and publishes a GitHub release with them attached. The tag sets the version
-# (v0.2 becomes 0.2.0), so Cargo.toml doesn't need a bump first. Regular pushes
-# and pull requests go through ci.yml, which only builds and tests.
+# and publishes a GitHub release with them attached. auto-tag.yml also calls it
+# after tagging a push to main. The tag sets the version (v0.2 becomes 0.2.0),
+# so Cargo.toml doesn't need a bump first. Pull requests go through ci.yml,
+# which only builds and tests.
 
 on:
   push:
     tags: ['v*']
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag to release, already pushed and pointing at the commit being built
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # The pushed tag, or the one auto-tag.yml passes in (github.ref is then main).
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   version:
@@ -31,7 +40,7 @@ jobs:
       - id: version
         name: Read version from tag
         run: |
-          version=${GITHUB_REF_NAME#v}
+          version=${TAG#v}
           # Pad short tags to full semver: v1 -> 1.0.0, v0.2 -> 0.2.0
           if [[ $version =~ ^[0-9]+$ ]]; then
             version=$version.0.0
@@ -39,7 +48,7 @@ jobs:
             version=$version.0
           fi
           if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME is not a version like v1.2.3"
+            echo "::error::Tag $TAG is not a version like v1.2.3"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -163,7 +172,7 @@ jobs:
           arm=$(sha256sum "$pkg/logship-$VERSION-aarch64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)
           sed -i \
             -e "s/^pkgver=.*/pkgver=$VERSION/" \
-            -e "s/^_tag=.*/_tag=$GITHUB_REF_NAME/" \
+            -e "s/^_tag=.*/_tag=$TAG/" \
             -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$x86')/" \
             -e "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('$arm')/" \
             "$pkg/PKGBUILD"
@@ -310,6 +319,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           draft: false
           generate_release_notes: true
           files: dist/*
