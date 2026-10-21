@@ -59,7 +59,9 @@ Check these numbers against your own logs with `cargo run --release --example be
 - **Scrollbar overview.** The scrollbar marks where errors, warnings and matches are in the file.
 - **Live tail.** Appended lines are indexed as they arrive, and Follow mode keeps the view at the bottom. If the file is truncated or rotated, it is reopened.
 - **Line cleanup.** ANSI color codes are stripped, tabs are expanded, invalid UTF-8 is shown safely, and very long lines are cut off before drawing.
-- **Dark by default**, with a light theme on ⇧⌘D.
+- **Exact copy.** Select text with the mouse, character by character, by word (double-click) or by line (triple-click), across as many lines as you like; dragging past the edge scrolls. Copying gives the text exactly as it is in the file, tabs included and long lines not cut short, minus the color codes and invisible control characters, so a pasted log line can't run anything hidden in it. With a filter on, only the lines you see are copied. On Linux the selection is also pasteable with the middle button.
+- **Tabs.** Open several logs side by side. Open tabs and recently opened files are remembered and come back on the next start.
+- **Settings** (⚙ or ⌘,). Pick the font and size and a dark or light theme. [Nordwand Mono](https://github.com/tywr/Nordwand-Mono) is built in and the default; installed monospace fonts like JetBrains Mono or Fira Code are offered too.
 
 ## 🧭 Set sail
 
@@ -91,9 +93,14 @@ Every push to `main` is released automatically as the next patch version (`.gith
 
 ## 🗺️ Keys
 
+On Linux and Windows, use Ctrl where the table says ⌘.
+
 | Key | Action |
 | --- | --- |
-| ⌘O | Open a file |
+| ⌘O | Open files (each in its own tab) |
+| ⌘T / ⌘W | New tab / close tab |
+| ⌃Tab / ⌃⇧Tab, ⇧⌘] / ⇧⌘[ | Next / previous tab |
+| ⌘, | Settings |
 | ⌘F or `/` | Search |
 | Enter / ⇧Enter (in search) | Next / previous match |
 | `n` / `N`, ⌘G / ⇧⌘G | Next / previous match |
@@ -102,7 +109,9 @@ Every push to `main` is released automatically as the next patch version (`.gith
 | Home End or `g` `G` | Top / bottom |
 | ← → or `h` `l`, `0` | Scroll sideways, reset |
 | Enter (in list) | Leave filter mode, keeping the selected line in context |
-| ⌘C / double-click | Copy line |
+| Drag, double-click, triple-click | Select text, a word, a line (⇧-click extends) |
+| ⌘C | Copy the selection, or the selected line if nothing is selected |
+| ⌘A | Select all shown lines |
 | `F`, ⇧⌘F | Follow the tail |
 | ⌥⌘C / ⌥⌘R / ⌥⌘F | Case-sensitive / regex / filter vs. highlight |
 | ⌥-click a level chip | Show only that level |
@@ -114,7 +123,10 @@ Every push to `main` is released automatically as the next patch version (`.gith
  src/
  ├── index.rs    mmap + parallel line index, level detection, incremental append
  ├── search.rs   chunked parallel regex filter with generation-based cancellation
- ├── view.rs     GPUI view: virtualized rows, custom scrollbar + minimap, input
+ ├── view.rs     GPUI view: virtualized rows, scrollbar + minimap, text selection, input
+ ├── workspace.rs  window root: tabs, settings panel, open/close, drag and drop
+ ├── settings.rs   font, size and theme; the bundled Nordwand Mono
+ ├── session.rs    saves settings, open tabs and recent files between runs
  ├── theme.rs    dark (default) and light palettes
  ├── decorations.rs  own title bar where the desktop draws none (GNOME on Wayland)
  └── main.rs     app, menus, key bindings
@@ -148,6 +160,8 @@ Please report vulnerabilities privately, not in public issues. See [SECURITY.md]
 ## 📜 License
 
 MIT. See [LICENSE](LICENSE).
+
+The bundled [Nordwand Mono](https://github.com/tywr/Nordwand-Mono) font is © Tanguy Vivier, under the SIL Open Font License 1.1 ([assets/fonts/LICENSE-NordwandMono.txt](assets/fonts/LICENSE-NordwandMono.txt)).
 
 <div align="center">
 <sub>Yo-ho-ho and a bottle of <code>grep</code>.</sub>

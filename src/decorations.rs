@@ -14,7 +14,7 @@ use gpui::{
     Tiling, Window, WindowDecorations, canvas, div, hsla, point, prelude::*, px,
 };
 
-use crate::{theme::Theme, view::LogView};
+use crate::{theme::Theme, workspace::Workspace};
 
 const TITLEBAR_H: f32 = 32.;
 /// Invisible border around the window that resizes it and holds its shadow.
@@ -154,6 +154,14 @@ pub fn chrome_height(window: &Window) -> f32 {
     TITLEBAR_H + edge(tiling.top) + edge(tiling.bottom)
 }
 
+/// Height of the title bar drawn by `title_bar`, or 0 when the desktop draws it.
+pub fn title_bar_height(window: &Window) -> f32 {
+    match window.window_decorations() {
+        Decorations::Client { .. } => TITLEBAR_H,
+        Decorations::Server => 0.,
+    }
+}
+
 /// The title bar, drawn only when the app has to draw its own decorations.
 /// Drag it to move the window, double-click to maximize, right-click for the
 /// window menu.
@@ -161,7 +169,7 @@ pub fn title_bar(
     title: &str,
     window: &Window,
     t: &Theme,
-    cx: &mut Context<LogView>,
+    cx: &mut Context<Workspace>,
 ) -> Option<AnyElement> {
     let Decorations::Client { .. } = window.window_decorations() else {
         return None;

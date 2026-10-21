@@ -122,7 +122,7 @@ jobs:
         run: |
           name=logship-$VERSION-${{ matrix.target }}
           mkdir -p dist "$name"
-          cp "$BIN" LICENSE README.md \
+          cp "$BIN" LICENSE README.md assets/fonts/LICENSE-NordwandMono.txt \
             packaging/linux/logship.desktop packaging/linux/logship.svg "$name/"
           tar -czf "dist/$name.tar.gz" "$name"
 
@@ -219,7 +219,7 @@ jobs:
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             name=logship-$VERSION-$target
             mkdir "$name"
-            cp target/$target/release/logship LICENSE README.md "$name/"
+            cp target/$target/release/logship LICENSE README.md assets/fonts/LICENSE-NordwandMono.txt "$name/"
             strip "$name/logship"
             tar -czf "dist/$name.tar.gz" "$name"
           done
@@ -233,6 +233,7 @@ jobs:
             target/x86_64-apple-darwin/release/logship
           strip "$app/Contents/MacOS/logship"
           sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          cp LICENSE assets/fonts/LICENSE-NordwandMono.txt "$app/Contents/Resources/"
           # Ad-hoc signature: Apple Silicon refuses to run unsigned code.
           # Not notarized, so users have to right-click > Open the first time.
           codesign --force --deep --sign - "$app"
@@ -293,7 +294,7 @@ jobs:
         run: |
           $name = "logship-$env:VERSION-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path $name, dist | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/logship.exe, LICENSE, README.md $name
+          Copy-Item target/${{ matrix.target }}/release/logship.exe, LICENSE, README.md, assets/fonts/LICENSE-NordwandMono.txt $name
           Compress-Archive -Path $name -DestinationPath "dist/$name.zip"
 
       - uses: actions/upload-artifact@v4

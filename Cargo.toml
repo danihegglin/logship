@@ -11,6 +11,8 @@ memmap2 = "0.9"
 memchr = "2"
 rayon = "1"
 regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Used to check, before opening the window, whether the Wayland compositor can
 # draw title bars (see src/decorations.rs). Already part of gpui's dependency tree.
@@ -41,6 +43,7 @@ assets = [
     ["packaging/linux/logship.desktop", "usr/share/applications/", "644"],
     ["packaging/linux/logship.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
     ["README.md", "usr/share/doc/logship/README.md", "644"],
+    ["assets/fonts/LICENSE-NordwandMono.txt", "usr/share/doc/logship/", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -51,6 +54,7 @@ assets = [
     { source = "packaging/linux/logship.desktop", dest = "/usr/share/applications/logship.desktop", mode = "644" },
     { source = "packaging/linux/logship.svg", dest = "/usr/share/icons/hicolor/scalable/apps/logship.svg", mode = "644" },
     { source = "LICENSE", dest = "/usr/share/licenses/logship/LICENSE", mode = "644", doc = true },
+    { source = "assets/fonts/LICENSE-NordwandMono.txt", dest = "/usr/share/licenses/logship/LICENSE-NordwandMono.txt", mode = "644", doc = true },
 ]
 
 [package.metadata.generate-rpm.requires]

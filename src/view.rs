@@ -6,8 +6,10 @@
 //! pixel precision.
 
 use std::{
+    cell::Cell,
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -16,10 +18,11 @@ use std::{
 };
 
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, DispatchPhase, ElementId, ExternalPaths, FocusHandle,
-    FontWeight, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathPromptOptions, Render, ScrollWheelEvent, SharedString, Stateful, StyledText,
-    Task, Window, actions, canvas, div, fill, font, point, prelude::*, px, size,
+    App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, ElementId,
+    EventEmitter, FocusHandle, Font, FontWeight, HighlightStyle, HitboxBehavior, Hsla,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    Render, ScrollWheelEvent, ShapedLine, SharedString, Stateful, StyledText, Task, TextRun,
+    Window, actions, canvas, div, fill, font, point, prelude::*, px, size,
 };
 use rayon::prelude::*;
 use regex::bytes::Regex;
@@ -28,7 +31,10 @@ use crate::{
     decorations,
     index::{ALL_LEVELS, Level, LogIndex, detect_level},
     search,
+    session::RecentFiles,
+    settings::Settings,
     theme::Theme,
+    workspace::TABBAR_H,
 };
 
 actions!(
@@ -42,24 +48,25 @@ actions!(
         ToggleCase,
         ToggleRegex,
         ToggleFilterMode,
-        CopyLine,
+        Copy,
+        SelectAll,
         NextMatch,
         PrevMatch,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PrevTab,
+        OpenSettings,
     ]
 );
 
-#[cfg(target_os = "macos")]
-const MONO: &str = "Menlo";
-#[cfg(target_os = "windows")]
-const MONO: &str = "Consolas";
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const MONO: &str = "DejaVu Sans Mono";
-
-const FONT_SIZE: f32 = 12.5;
-const LINE_HEIGHT: f32 = 19.;
 const HEADER_H: f32 = 44.;
 const STATUS_H: f32 = 26.;
 const SCROLLBAR_W: f32 = 14.;
+/// Width of the level stripe left of the line numbers.
+const STRIPE_W: f32 = 3.;
+/// Most text a single copy puts on the clipboard.
+const MAX_COPY: usize = 64 << 20;
 const MIN_THUMB_H: f32 = 28.;
 /// Longest line prefix (in chars) that is shaped and displayed.
 const MAX_COLS: usize = 4000;
@@ -81,6 +88,57 @@ const LEVEL_CHIPS: [Level; 6] = [
     Level::None,
 ];
 
+/// "⌘" on macOS, "Ctrl+" elsewhere, for shortcut hints.
+pub fn mod_key() -> &'static str {
+    if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" }
+}
+
+/// A position in the log: a line and a byte offset into its raw contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TextPos {
+    line: usize,
+    byte: usize,
+}
+
+/// What a mouse drag selects: characters, words (double-click) or lines (triple-click).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DragUnit {
+    Char,
+    Word,
+    Line,
+}
+
+struct Drag {
+    unit: DragUnit,
+    /// The word or line first clicked, which stays selected while dragging.
+    origin: (TextPos, TextPos),
+}
+
+/// A point on a log row: the row's display text and the byte under the pointer.
+struct Hit {
+    line: usize,
+    display: DisplayLine,
+    /// Character boundary in `display.text`.
+    ix: usize,
+    raw_len: usize,
+}
+
+impl Hit {
+    fn pos_at(&self, ix: usize) -> TextPos {
+        TextPos {
+            line: self.line,
+            byte: self.display.raw_offset(ix, self.raw_len),
+        }
+    }
+}
+
+pub enum LogViewEvent {
+    /// A file started loading in this view.
+    Opened(PathBuf),
+    /// A recent file was picked on the empty-tab screen.
+    OpenRequested(PathBuf),
+}
+
 struct Loading {
     path: PathBuf,
     progress: Arc<AtomicU64>,
@@ -94,7 +152,8 @@ pub struct LogView {
     loading: Option<Loading>,
     error: Option<String>,
     index_ms: u128,
-    dark: bool,
+    /// The file shown or being loaded, even if loading failed.
+    path: Option<PathBuf>,
 
     query: String,
     case_sensitive: bool,
@@ -122,6 +181,10 @@ pub struct LogView {
     selected: Option<usize>,
     follow: bool,
     char_w: f32,
+    font_family: SharedString,
+    font_size: f32,
+    line_h: f32,
+    gutter_w: f32,
     last_visible_rows: usize,
     thumb_grab: Option<f32>,
 
@@ -129,13 +192,23 @@ pub struct LogView {
     markers_dirty: bool,
     markers_task: Option<Task<()>>,
 
+    /// Text selection as (anchor, head); the head follows the pointer while dragging.
+    selection: Option<(TextPos, TextPos)>,
+    drag: Option<Drag>,
+    drag_pos: Option<Point<Pixels>>,
+    autoscroll: Option<Task<()>>,
+    /// Where the log rows were drawn in the last frame, for mouse hit-testing.
+    list_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Brief message in the status bar, e.g. after copying.
+    note: Option<String>,
+    note_task: Option<Task<()>>,
+
     list_focus: FocusHandle,
     search_focus: FocusHandle,
-    title: String,
-    /// Set while the left button is held on the client-side title bar.
-    pub(crate) titlebar_drag: bool,
     _watch: Option<Task<()>>,
 }
+
+impl EventEmitter<LogViewEvent> for LogView {}
 
 impl LogView {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -144,7 +217,7 @@ impl LogView {
             loading: None,
             error: None,
             index_ms: 0,
-            dark: true,
+            path: None,
             query: String::new(),
             case_sensitive: false,
             use_regex: false,
@@ -165,21 +238,53 @@ impl LogView {
             selected: None,
             follow: false,
             char_w: 0.,
+            font_family: SharedString::default(),
+            font_size: 0.,
+            line_h: 19.,
+            gutter_w: 0.,
             last_visible_rows: 40,
             thumb_grab: None,
             markers: Arc::new(vec![0; MARKER_BUCKETS]),
             markers_dirty: false,
             markers_task: None,
+            selection: None,
+            drag: None,
+            drag_pos: None,
+            autoscroll: None,
+            list_bounds: Rc::default(),
+            note: None,
+            note_task: None,
             list_focus: cx.focus_handle(),
             search_focus: cx.focus_handle(),
-            title: String::new(),
-            titlebar_drag: false,
             _watch: None,
         }
     }
 
     pub fn list_focus(&self) -> &FocusHandle {
         &self.list_focus
+    }
+
+    /// The file shown or being loaded in this view.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Picks up font changes from the settings.
+    fn sync_settings(&mut self, window: &Window, cx: &App) {
+        let s = cx.global::<Settings>();
+        if self.char_w > 0. && self.font_family.as_ref() == s.font_family && self.font_size == s.font_size {
+            return;
+        }
+        self.font_family = s.font_family.clone().into();
+        self.font_size = s.font_size;
+        self.line_h = s.line_height();
+        let text = window.text_system();
+        let id = text.resolve_font(&font(self.font_family.clone()));
+        self.char_w = text
+            .advance(id, px(self.font_size), 'm')
+            .map(|s| f32::from(s.width))
+            .unwrap_or(self.font_size * 0.6);
+        self.clamp_scroll();
     }
 
     // ---------------------------------------------------------------- loading
@@ -191,6 +296,8 @@ impl LogView {
         let job_path = path.clone();
         self._watch = None;
         self.error = None;
+        self.path = Some(path.clone());
+        cx.emit(LogViewEvent::Opened(path.clone()));
 
         let task = cx.spawn(async move |this, cx| {
             let started = Instant::now();
@@ -241,6 +348,8 @@ impl LogView {
         let reopened = self.index.as_ref().is_some_and(|i| i.path == index.path);
         self.index = Some(Arc::new(index));
         self.index_ms = ms;
+        self.selection = None;
+        self.drag = None;
         if !reopened {
             self.top_row = 0;
             self.sub_px = 0.;
@@ -554,13 +663,13 @@ impl LogView {
         .min(self.row_count().saturating_sub(1))
     }
 
-    fn list_height(window: &Window) -> f32 {
-        let chrome = HEADER_H + STATUS_H + decorations::chrome_height(window);
-        (f32::from(window.viewport_size().height) - chrome).max(LINE_HEIGHT)
+    fn list_height(&self, window: &Window) -> f32 {
+        let chrome = HEADER_H + STATUS_H + TABBAR_H + decorations::chrome_height(window);
+        (f32::from(window.viewport_size().height) - chrome).max(self.line_h)
     }
 
     fn visible_rows(&self, window: &Window) -> usize {
-        ((Self::list_height(window) / LINE_HEIGHT).floor() as usize).max(1)
+        ((self.list_height(window) / self.line_h).floor() as usize).max(1)
     }
 
     fn page(&self) -> usize {
@@ -572,11 +681,11 @@ impl LogView {
     }
 
     fn scroll_offset(&self) -> f64 {
-        self.top_row as f64 * LINE_HEIGHT as f64 + self.sub_px as f64
+        self.top_row as f64 * self.line_h as f64 + self.sub_px as f64
     }
 
     fn set_scroll_offset(&mut self, offset: f64) {
-        let lh = LINE_HEIGHT as f64;
+        let lh = self.line_h as f64;
         let max = self.max_top() as f64 * lh;
         let offset = offset.clamp(0., max);
         self.top_row = (offset / lh).floor() as usize;
@@ -667,30 +776,269 @@ impl LogView {
         self.h_offset = (self.h_offset + dx).clamp(0., MAX_COLS as f32 * self.char_w.max(1.));
     }
 
-    fn copy_selected(&self, cx: &mut App) {
-        if let (Some(index), Some(line)) = (&self.index, self.selected)
-            && line < index.line_count()
-        {
-            let text = String::from_utf8_lossy(index.line(line)).into_owned();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+    // ---------------------------------------------------------------- text selection
+
+    /// The selection as (start, end), if it covers any text.
+    fn selection_range(&self) -> Option<(TextPos, TextPos)> {
+        let (a, b) = self.selection?;
+        let (start, end) = if a <= b { (a, b) } else { (b, a) };
+        (start != end).then_some((start, end))
+    }
+
+    /// The row character under `pos` (window coordinates). Positions above or below
+    /// the rows on screen hit the first or last of them.
+    fn hit(&self, pos: Point<Pixels>, window: &Window) -> Option<Hit> {
+        let bounds = self.list_bounds.get()?;
+        let index = self.index.as_ref()?;
+        let count = self.row_count();
+        if count == 0 {
+            return None;
+        }
+        let y = f32::from(pos.y - bounds.top()).clamp(0., f32::from(bounds.size.height) - 1.);
+        let row = (self.top_row + ((y + self.sub_px) / self.line_h) as usize).min(count - 1);
+        let line = self.row_to_line(row)?;
+        let bytes = index.line(line);
+        let display = DisplayLine::new(bytes);
+        let x = f32::from(pos.x - bounds.left()) - STRIPE_W - self.gutter_w + self.h_offset;
+        let ix = if x <= 0. || display.text.is_empty() {
+            0
+        } else {
+            let shaped = self.shape(&display.text, index.level(line), window);
+            closest_boundary(&shaped, px(x))
+        };
+        Some(Hit {
+            line,
+            display,
+            ix,
+            raw_len: bytes.len(),
+        })
+    }
+
+    /// Shapes a row's text the way `render_row` draws it (the level token is bold).
+    fn shape(&self, text: &str, level: Level, window: &Window) -> ShapedLine {
+        let normal = font(self.font_family.clone());
+        let run = |len: usize, font: Font| TextRun {
+            len,
+            font,
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let mut runs = Vec::with_capacity(3);
+        match detect_level(text.as_bytes()).filter(|_| level != Level::None) {
+            Some((_, token)) => {
+                let bold = Font {
+                    weight: FontWeight::BOLD,
+                    ..normal.clone()
+                };
+                runs.push(run(token.start, normal.clone()));
+                runs.push(run(token.len(), bold));
+                runs.push(run(text.len() - token.end, normal));
+            }
+            None => runs.push(run(text.len(), normal)),
+        }
+        runs.retain(|r| r.len > 0);
+        window
+            .text_system()
+            .shape_line(text.to_string().into(), px(self.font_size), &runs, None)
+    }
+
+    fn word_at(hit: &Hit) -> (TextPos, TextPos) {
+        let r = word_range(&hit.display.text, hit.ix);
+        (hit.pos_at(r.start), hit.pos_at(r.end))
+    }
+
+    fn line_at(&self, line: usize) -> (TextPos, TextPos) {
+        let len = self.index.as_ref().map_or(0, |i| i.line(line).len());
+        (TextPos { line, byte: 0 }, TextPos { line, byte: len })
+    }
+
+    fn on_text_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.list_focus);
+        let Some(hit) = self.hit(ev.position, window) else {
+            return;
+        };
+        self.selected = Some(hit.line);
+        let pos = hit.pos_at(hit.ix);
+        let (unit, origin) = match ev.click_count {
+            0 | 1 => (DragUnit::Char, (pos, pos)),
+            2 => (DragUnit::Word, Self::word_at(&hit)),
+            _ => (DragUnit::Line, self.line_at(hit.line)),
+        };
+        self.selection = match self.selection {
+            Some((anchor, _)) if unit == DragUnit::Char && ev.modifiers.shift => Some((anchor, pos)),
+            _ => Some(origin),
+        };
+        self.drag = Some(Drag { unit, origin });
+        self.drag_pos = Some(ev.position);
+        cx.notify();
+    }
+
+    fn on_text_drag(&mut self, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.drag_pos = Some(pos);
+        self.extend_selection(pos, window);
+        self.update_autoscroll(window, cx);
+        cx.notify();
+    }
+
+    fn extend_selection(&mut self, pos: Point<Pixels>, window: &Window) {
+        let Some(drag) = &self.drag else { return };
+        let (unit, (o_start, o_end)) = (drag.unit, drag.origin);
+        let Some(hit) = self.hit(pos, window) else { return };
+        let (start, end) = match unit {
+            DragUnit::Char => {
+                let pos = hit.pos_at(hit.ix);
+                (pos, pos)
+            }
+            DragUnit::Word => Self::word_at(&hit),
+            DragUnit::Line => self.line_at(hit.line),
+        };
+        self.selection = Some(match unit {
+            DragUnit::Char => (self.selection.map_or(start, |(anchor, _)| anchor), start),
+            _ if start < o_start => (o_end, start),
+            _ => (o_start, end.max(o_end)),
+        });
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag.take().is_none() {
+            return;
+        }
+        self.autoscroll = None;
+        self.drag_pos = None;
+        // Linux convention: selecting text makes it pastable with the middle button.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some((text, _, _)) = self.selected_text() {
+            cx.write_to_primary(ClipboardItem::new_string(text));
+        }
+        cx.notify();
+    }
+
+    /// Keeps scrolling while a selection is dragged above or below the rows.
+    fn update_autoscroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let outside = matches!(
+            (self.drag_pos, self.list_bounds.get()),
+            (Some(p), Some(b)) if p.y < b.top() || p.y >= b.bottom()
+        );
+        if !outside {
+            self.autoscroll = None;
+        } else if self.autoscroll.is_none() {
+            self.autoscroll = Some(cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(40)).await;
+                    let more = this
+                        .update_in(cx, |this, window, cx| this.autoscroll_tick(window, cx))
+                        .unwrap_or(false);
+                    if !more {
+                        break;
+                    }
+                }
+            }));
         }
     }
 
-    fn prompt_open(&mut self, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Open Log".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await
-                && let Some(path) = paths.into_iter().next()
-            {
-                this.update(cx, |this, cx| this.open(path, cx)).ok();
+    fn autoscroll_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let (Some(pos), Some(bounds), true) = (self.drag_pos, self.list_bounds.get(), self.drag.is_some()) else {
+            self.autoscroll = None;
+            return false;
+        };
+        let dist = if pos.y < bounds.top() {
+            f32::from(pos.y - bounds.top())
+        } else if pos.y >= bounds.bottom() {
+            f32::from(pos.y - bounds.bottom())
+        } else {
+            self.autoscroll = None;
+            return false;
+        };
+        // Faster the further the pointer is from the rows.
+        let rows = (dist / self.line_h).clamp(-10., 10.);
+        let step = if rows < 0. { rows.floor() } else { rows.ceil().max(1.) };
+        self.set_scroll_offset(self.scroll_offset() + step as f64 * self.line_h as f64);
+        self.follow = false;
+        self.extend_selection(pos, window);
+        cx.notify();
+        true
+    }
+
+    fn select_all(&mut self) {
+        let count = self.row_count();
+        let (Some(index), Some(first), Some(last)) =
+            (&self.index, self.row_to_line(0), self.row_to_line(count.saturating_sub(1)))
+        else {
+            return;
+        };
+        self.selection = Some((
+            TextPos { line: first, byte: 0 },
+            TextPos { line: last, byte: index.line(last).len() },
+        ));
+    }
+
+    /// The selected text as it is in the file, without terminal escape sequences
+    /// or other control characters (tabs are kept). Lines hidden by a filter are
+    /// left out. Returns the text, the number of lines and whether it was cut at
+    /// `MAX_COPY`.
+    fn selected_text(&self) -> Option<(String, usize, bool)> {
+        let (start, end) = self.selection_range()?;
+        let index = self.index.as_ref()?;
+        let mut out = String::new();
+        let mut lines = 0;
+        let mut row = self.line_to_row(start.line);
+        while let Some(line) = self.row_to_line(row) {
+            row += 1;
+            if line < start.line {
+                continue;
             }
-        })
-        .detach();
+            if line > end.line {
+                break;
+            }
+            let bytes = index.line(line);
+            let from = if line == start.line { start.byte.min(bytes.len()) } else { 0 };
+            let to = if line == end.line { end.byte.min(bytes.len()) } else { bytes.len() };
+            if lines > 0 {
+                out.push('\n');
+            }
+            push_copy_text(&mut out, &bytes[from..to.max(from)]);
+            lines += 1;
+            if out.len() > MAX_COPY {
+                return Some((out, lines, true));
+            }
+        }
+        Some((out, lines, false))
+    }
+
+    /// Copies the selected text, or the whole selected line if no text is selected.
+    fn copy(&mut self, cx: &mut Context<Self>) {
+        let copied = self.selected_text().or_else(|| {
+            let (index, line) = (self.index.as_ref()?, self.selected?);
+            let mut text = String::new();
+            push_copy_text(&mut text, index.line(line));
+            Some((text, 1, false))
+        });
+        let Some((text, lines, truncated)) = copied else { return };
+        let note = if truncated {
+            format!("Copied the first {} lines ({})", format_int(lines), format_bytes(text.len() as u64))
+        } else if lines > 1 {
+            format!("Copied {} lines", format_int(lines))
+        } else {
+            format!("Copied {} characters", format_int(text.chars().count()))
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.show_note(note, cx);
+    }
+
+    fn show_note(&mut self, note: String, cx: &mut Context<Self>) {
+        self.note = Some(note);
+        self.note_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(2500)).await;
+            this.update(cx, |this, cx| {
+                this.note = None;
+                this.note_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     // ---------------------------------------------------------------- input
@@ -722,7 +1070,10 @@ impl LogView {
             ("n", true) => self.jump_to_hit(false),
             ("f", true) => self.toggle_follow(),
             ("/", _) => window.focus(&self.search_focus),
-            ("escape", _) => self.selected = None,
+            ("escape", _) => {
+                self.selected = None;
+                self.selection = None;
+            }
             ("enter", _) => {
                 // Leave filter mode and keep the selected line in context.
                 if self.filter_mode && self.regex.is_some() {
@@ -784,7 +1135,7 @@ impl LogView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let delta = ev.delta.pixel_delta(px(LINE_HEIGHT));
+        let delta = ev.delta.pixel_delta(px(self.line_h));
         let (mut dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         if ev.modifiers.shift && dx == 0. {
             dx = dy;
@@ -823,10 +1174,6 @@ impl LogView {
 
     // ---------------------------------------------------------------- rendering
 
-    fn theme(&self) -> Theme {
-        if self.dark { Theme::dark() } else { Theme::light() }
-    }
-
     fn render_row(
         &self,
         row: usize,
@@ -834,9 +1181,9 @@ impl LogView {
         index: &LogIndex,
         gutter_w: f32,
         t: &Theme,
-        cx: &mut Context<Self>,
     ) -> (impl IntoElement + use<>, usize) {
-        let text = display_text(index.line(line));
+        let display = DisplayLine::new(index.line(line));
+        let text = display.text.clone();
         let cols = text.chars().count();
         let level = index.level(line);
         let selected = self.selected == Some(line);
@@ -883,6 +1230,16 @@ impl LogView {
             );
         }
 
+        if let Some((start, end)) = self.selection_range()
+            && (start.line..=end.line).contains(&line)
+        {
+            let from = if line == start.line { display.display_offset(start.byte) } else { 0 };
+            let to = if line == end.line { display.display_offset(end.byte) } else { text.len() };
+            if from < to {
+                highlights = overlay_background(highlights, from..to, t.text_selection);
+            }
+        }
+
         let text_color = if level == Level::Error {
             t.error_text
         } else {
@@ -896,25 +1253,14 @@ impl LogView {
 
         let element = div()
             .id(ElementId::Integer(row as u64))
-            .h(px(LINE_HEIGHT))
+            .h(px(self.line_h))
             .w_full()
             .flex()
             .flex_row()
             .items_center()
             .when(selected, |d| d.bg(t.selection))
             .when(!selected, |d| d.hover(|s| s.bg(t.row_hover)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                    this.selected = Some(line);
-                    window.focus(&this.list_focus);
-                    if ev.click_count == 2 {
-                        this.copy_selected(cx);
-                    }
-                    cx.notify();
-                }),
-            )
-            .child(div().w(px(3.)).h_full().flex_none().bg(stripe))
+            .child(div().w(px(STRIPE_W)).h_full().flex_none().bg(stripe))
             .child(
                 div()
                     .w(px(gutter_w))
@@ -944,7 +1290,7 @@ impl LogView {
         let frac = if max_top == 0 {
             0.
         } else {
-            (self.scroll_offset() / (max_top as f64 * LINE_HEIGHT as f64)) as f32
+            (self.scroll_offset() / (max_top as f64 * self.line_h as f64)) as f32
         };
         let markers = self.markers.clone();
         let entity = cx.entity();
@@ -1018,7 +1364,7 @@ impl LogView {
                 let top = bounds.origin.y;
                 let set_from_y = move |this: &mut LogView, y: f32, grab: f32| {
                     let f = ((y - f32::from(top) - grab) / travel).clamp(0., 1.) as f64;
-                    let max = this.max_top() as f64 * LINE_HEIGHT as f64;
+                    let max = this.max_top() as f64 * this.line_h as f64;
                     this.set_scroll_offset(f * max);
                     this.follow = f >= 1.;
                 };
@@ -1081,6 +1427,7 @@ impl LogView {
         let index = self.index.clone().expect("render_list requires an index");
         let digits = format_int(index.line_count().max(1)).len() as f32;
         let gutter_w = digits * self.char_w + 20.;
+        self.gutter_w = gutter_w;
 
         let first = self.top_row;
         let last = (first + visible + 2).min(self.row_count());
@@ -1088,7 +1435,7 @@ impl LogView {
         let mut rows = Vec::with_capacity(last - first);
         for row in first..last {
             let Some(line) = self.row_to_line(row) else { break };
-            let (el, cols) = self.render_row(row, line, &index, gutter_w, t, cx);
+            let (el, cols) = self.render_row(row, line, &index, gutter_w, t);
             widest = widest.max(cols);
             rows.push(el);
         }
@@ -1103,9 +1450,9 @@ impl LogView {
             .relative()
             .overflow_hidden()
             .bg(t.bg)
-            .font_family(MONO)
-            .text_size(px(FONT_SIZE))
-            .line_height(px(LINE_HEIGHT))
+            .font_family(self.font_family.clone())
+            .text_size(px(self.font_size))
+            .line_height(px(self.line_h))
             .track_focus(&self.list_focus)
             .on_key_down(cx.listener(Self::on_list_key))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
@@ -1118,9 +1465,68 @@ impl LogView {
                     .children(rows),
             )
             .child(self.render_scrollbar(visible, t, cx))
+            .child(self.render_selection_layer(cx))
+    }
+
+    /// An invisible layer over the rows that turns mouse presses and drags into
+    /// text selections. Drags keep extending the selection outside the rows.
+    fn render_selection_layer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let entity = cx.entity();
+        let bounds_cell = self.list_bounds.clone();
+        canvas(
+            move |bounds, window, _| {
+                bounds_cell.set(Some(bounds));
+                let text_area = Bounds::new(
+                    bounds.origin,
+                    size(bounds.size.width - px(SCROLLBAR_W), bounds.size.height),
+                );
+                window.insert_hitbox(text_area, HitboxBehavior::Normal)
+            },
+            move |_, hitbox, window, _| {
+                window.set_cursor_style(CursorStyle::IBeam, &hitbox);
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |ev: &MouseDownEvent, phase, window, cx| {
+                        if phase == DispatchPhase::Bubble
+                            && ev.button == MouseButton::Left
+                            && hitbox.is_hovered(window)
+                        {
+                            entity.update(cx, |this, cx| this.on_text_mouse_down(ev, window, cx));
+                        }
+                    }
+                });
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |ev: &MouseMoveEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+                        entity.update(cx, |this, cx| {
+                            if this.drag.is_none() {
+                            } else if ev.pressed_button == Some(MouseButton::Left) {
+                                this.on_text_drag(ev.position, window, cx);
+                            } else {
+                                // The button was released outside the window.
+                                this.end_drag(cx);
+                            }
+                        });
+                    }
+                });
+                window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left {
+                        entity.update(cx, |this, cx| this.end_drag(cx));
+                    }
+                });
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
     }
 
     fn render_header(&self, window: &Window, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let dark = cx.global::<Settings>().dark;
         let search_focused = self.search_focus.is_focused(window);
         let hit_info = if self.regex.is_some() {
             let total = self.hits.len();
@@ -1166,10 +1572,10 @@ impl LogView {
                     .items_center()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .font_family(MONO)
-                    .text_size(px(FONT_SIZE))
+                    .font_family(self.font_family.clone())
+                    .text_size(px(self.font_size))
                     .when(self.query.is_empty(), |d| {
-                        d.text_color(t.text_muted).child("Search  (⌘F)")
+                        d.text_color(t.text_muted).child(format!("Search  ({}F)", mod_key()))
                     })
                     .when(!self.query.is_empty(), |d| {
                         d.text_color(t.text).child(SharedString::from(self.query.clone()))
@@ -1270,7 +1676,7 @@ impl LogView {
             .child(
                 chip("open", false, t)
                     .child("Open…")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.prompt_open(cx))),
+                    .on_click(|_: &ClickEvent, window, cx| window.dispatch_action(Box::new(Open), cx)),
             )
             .child(search_box)
             .child(mode)
@@ -1286,11 +1692,13 @@ impl LogView {
             )
             .child(
                 chip("theme", false, t)
-                    .child(if self.dark { "☀" } else { "☾" })
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.dark = !this.dark;
-                        cx.notify();
-                    })),
+                    .child(if dark { "☀" } else { "☾" })
+                    .on_click(|_: &ClickEvent, window, cx| window.dispatch_action(Box::new(ToggleTheme), cx)),
+            )
+            .child(
+                chip("settings", false, t)
+                    .child("⚙")
+                    .on_click(|_: &ClickEvent, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
             )
     }
 
@@ -1313,6 +1721,9 @@ impl LogView {
         if let Some(line) = self.selected {
             right.push(format!("Ln {}", format_int(line + 1)));
         }
+        if let Some(note) = &self.note {
+            right.insert(0, note.clone());
+        }
 
         div()
             .h(px(STATUS_H))
@@ -1333,7 +1744,7 @@ impl LogView {
             .child(div().whitespace_nowrap().child(right.join("  ·  ")))
     }
 
-    fn render_placeholder(&self, t: &Theme) -> impl IntoElement + use<> {
+    fn render_placeholder(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let body = if let Some(loading) = &self.loading {
             let done = loading.progress.load(Ordering::Relaxed) as f32;
             let frac = if loading.total == 0 {
@@ -1380,11 +1791,12 @@ impl LogView {
                 .child(
                     div()
                         .text_color(t.text_muted)
-                        .child("Open a log file with ⌘O or drop it here"),
+                        .child(format!("Open a log file with {}O or drop it here", mod_key())),
                 )
                 .when_some(self.error.clone(), |d, err| {
                     d.child(div().mt_2().text_color(t.error_text).child(err))
                 })
+                .child(self.render_recent(t, cx))
         };
         div()
             .flex_1()
@@ -1395,61 +1807,71 @@ impl LogView {
             .track_focus(&self.list_focus)
             .child(body)
     }
+
+    /// Recently opened files, shown on an empty tab.
+    fn render_recent(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let recent: Vec<PathBuf> = cx.try_global::<RecentFiles>().map(|r| r.0.clone()).unwrap_or_default();
+        let hover = t.surface_hover;
+        div()
+            .mt_6()
+            .w(px(460.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .when(!recent.is_empty(), |d| {
+                d.child(div().px_2().text_xs().text_color(t.text_muted).child("Recent files"))
+            })
+            .children(recent.into_iter().take(10).enumerate().map(|(i, path)| {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                let dir = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                div()
+                    .id(("recent", i))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .child(div().flex_none().text_color(t.text).child(name))
+                    .child(div().flex_1().truncate().text_xs().text_color(t.text_muted).child(dir))
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.emit(LogViewEvent::OpenRequested(path.clone()));
+                    }))
+            }))
+    }
 }
 
 impl Render for LogView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = self.theme();
-        if self.char_w == 0. {
-            let text = window.text_system();
-            let id = text.resolve_font(&font(MONO));
-            self.char_w = text
-                .advance(id, px(FONT_SIZE), 'm')
-                .map(|s| f32::from(s.width))
-                .unwrap_or(FONT_SIZE * 0.6);
-        }
+        self.sync_settings(window, cx);
+        let t = cx.global::<Settings>().theme();
 
-        let title = match &self.index {
-            Some(index) => format!(
-                "{} — logship",
-                index
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            ),
-            None => "logship".into(),
-        };
-        if title != self.title {
-            window.set_window_title(&title);
-            self.title = title;
-        }
-
-        let title_bar = decorations::title_bar(&self.title, window, &t, cx);
         let header = self.render_header(window, &t, cx);
         let status = self.render_status(&t);
         let body = if self.index.is_some() && self.loading.is_none() {
             self.render_list(window, &t, cx).into_any_element()
         } else {
-            self.render_placeholder(&t).into_any_element()
+            self.render_placeholder(&t, cx).into_any_element()
         };
 
-        let root = div()
-            .id("root")
+        div()
+            .id("log-view")
             .key_context("LogView")
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .flex()
             .flex_col()
             .bg(t.bg)
             .text_color(t.text)
             .text_sm()
-            .on_action(cx.listener(|this, _: &Open, _, cx| this.prompt_open(cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 window.focus(&this.search_focus);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| {
-                this.dark = !this.dark;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleFollow, _, cx| {
@@ -1469,7 +1891,11 @@ impl Render for LogView {
                 this.refilter(cx);
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &CopyLine, _, cx| this.copy_selected(cx)))
+            .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
+                this.select_all();
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &NextMatch, _, cx| {
                 this.jump_to_hit(true);
                 cx.notify();
@@ -1478,20 +1904,9 @@ impl Render for LogView {
                 this.jump_to_hit(false);
                 cx.notify();
             }))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                if let Some(path) = paths.paths().first() {
-                    this.open(path.clone(), cx);
-                }
-            }))
-            .drag_over::<ExternalPaths>({
-                let accent = t.accent;
-                move |style, _, _, _| style.border_2().border_color(accent)
-            })
-            .children(title_bar)
             .child(header)
             .child(body)
-            .child(status);
-        decorations::frame(window, &t, root)
+            .child(status)
     }
 }
 
@@ -1525,44 +1940,206 @@ fn level_short(level: Level) -> &'static str {
     }
 }
 
-/// Converts raw line bytes into displayable text: lossy UTF-8, ANSI escape sequences
-/// stripped, tabs expanded, control characters made visible, length capped.
-fn display_text(bytes: &[u8]) -> String {
-    let bytes = &bytes[..bytes.len().min(MAX_COLS * 4)];
-    let s = String::from_utf8_lossy(bytes);
-    let mut out = String::with_capacity(s.len());
-    let mut cols = 0;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => {
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    for c in chars.by_ref() {
-                        if ('@'..='~').contains(&c) {
-                            break;
-                        }
+/// Calls `f` with each character of a raw line and the byte offset it starts at.
+/// Invalid UTF-8 becomes U+FFFD and terminal escape sequences (`ESC [ ... final`,
+/// or a lone ESC) are skipped. Stops early when `f` returns false.
+fn for_each_visible_char(bytes: &[u8], mut f: impl FnMut(char, usize) -> bool) {
+    #[derive(PartialEq)]
+    enum Esc {
+        None,
+        Start,
+        Csi,
+    }
+    let mut esc = Esc::None;
+    let mut offset = 0;
+    for chunk in bytes.utf8_chunks() {
+        let base = offset;
+        let valid = chunk.valid();
+        offset += valid.len() + chunk.invalid().len();
+        let invalid = (!chunk.invalid().is_empty()).then_some(('\u{fffd}', base + valid.len()));
+        for (c, raw) in valid.char_indices().map(|(i, c)| (c, base + i)).chain(invalid) {
+            match esc {
+                Esc::Csi => {
+                    if ('@'..='~').contains(&c) {
+                        esc = Esc::None;
                     }
+                    continue;
                 }
+                Esc::Start if c == '[' => {
+                    esc = Esc::Csi;
+                    continue;
+                }
+                _ => esc = Esc::None,
             }
-            '\t' => {
-                let n = 4 - cols % 4;
-                out.extend(std::iter::repeat_n(' ', n));
-                cols += n;
+            if c == '\x1b' {
+                esc = Esc::Start;
+                continue;
             }
-            c if c.is_control() => {
-                out.push('·');
-                cols += 1;
-            }
-            c => {
-                out.push(c);
-                cols += 1;
+            if !f(c, raw) {
+                return;
             }
         }
-        if cols >= MAX_COLS {
-            out.push('…');
-            break;
+    }
+}
+
+/// A raw line as shown on screen: escape sequences stripped, tabs expanded,
+/// control characters shown as `·`, length capped at `MAX_COLS`. `map` records
+/// the raw byte each displayed character came from, so text selected on screen
+/// can be copied from the original bytes.
+struct DisplayLine {
+    text: String,
+    /// (display byte offset, raw byte offset) of every displayed character.
+    map: Vec<(usize, usize)>,
+}
+
+impl DisplayLine {
+    fn new(bytes: &[u8]) -> DisplayLine {
+        let shown = &bytes[..bytes.len().min(MAX_COLS * 4)];
+        let mut text = String::with_capacity(shown.len());
+        let mut map = Vec::with_capacity(shown.len());
+        let mut cols = 0;
+        let mut truncated = shown.len() < bytes.len();
+        for_each_visible_char(shown, |c, raw| {
+            if cols >= MAX_COLS {
+                truncated = true;
+                return false;
+            }
+            let (shown, width) = match c {
+                '\t' => (' ', 4 - cols % 4),
+                c if c.is_control() => ('·', 1),
+                c => (c, 1),
+            };
+            for _ in 0..width {
+                map.push((text.len(), raw));
+                text.push(shown);
+            }
+            cols += width;
+            true
+        });
+        if truncated {
+            // Selecting the ellipsis selects the rest of the line.
+            map.push((text.len(), bytes.len()));
+            text.push('…');
         }
+        DisplayLine { text, map }
+    }
+
+    /// Raw byte offset for a character boundary in `text`; the end of the text is
+    /// the end of the raw line.
+    fn raw_offset(&self, ix: usize, raw_len: usize) -> usize {
+        let i = self.map.partition_point(|&(d, _)| d < ix);
+        match self.map.get(i) {
+            Some(&(_, raw)) => raw,
+            None => raw_len,
+        }
+    }
+
+    /// Display offset of the first character that starts at or after raw byte `raw`.
+    fn display_offset(&self, raw: usize) -> usize {
+        let i = self.map.partition_point(|&(_, r)| r < raw);
+        self.map.get(i).map_or(self.text.len(), |&(d, _)| d)
+    }
+}
+
+/// Appends a raw line slice as copied text: what is shown, but with tabs kept and
+/// nothing cut short. Escape sequences and other control characters are dropped,
+/// so pasting into a terminal can't run anything hidden in the log.
+fn push_copy_text(out: &mut String, bytes: &[u8]) {
+    for_each_visible_char(bytes, |c, _| {
+        if c == '\t' || !c.is_control() {
+            out.push(c);
+        }
+        true
+    });
+}
+
+/// The character boundary in a shaped line closest to `x`.
+fn closest_boundary(line: &ShapedLine, x: Pixels) -> usize {
+    let glyphs: Vec<(usize, Pixels)> = line
+        .runs
+        .iter()
+        .flat_map(|run| run.glyphs.iter().map(|g| (g.index, g.position.x)))
+        .collect();
+    for (i, &(ix, left)) in glyphs.iter().enumerate() {
+        let next = glyphs.get(i + 1);
+        let right = next.map_or(line.width, |g| g.1);
+        if x < right {
+            return if x < left + (right - left) / 2. {
+                ix
+            } else {
+                next.map_or(line.len, |g| g.0)
+            };
+        }
+    }
+    line.len
+}
+
+/// Byte range of the word around boundary `ix`, or of the single character there
+/// if it isn't part of a word.
+fn word_range(text: &str, ix: usize) -> Range<usize> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let ix = ix.min(text.len());
+    let Some(c) = text[ix..].chars().next() else {
+        return ix..ix;
+    };
+    if !is_word(c) {
+        return ix..ix + c.len_utf8();
+    }
+    let start = text[..ix]
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| is_word(c))
+        .last()
+        .map_or(ix, |(i, _)| i);
+    let end = text[ix..]
+        .char_indices()
+        .find(|&(_, c)| !is_word(c))
+        .map_or(text.len(), |(i, _)| ix + i);
+    start..end
+}
+
+/// Gives `range` the background `bg`, on top of `highlights` (sorted, not
+/// overlapping), splitting highlights where the range starts or ends.
+fn overlay_background(
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    range: Range<usize>,
+    bg: Hsla,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let with_bg = |style: HighlightStyle| HighlightStyle {
+        background_color: Some(bg),
+        ..style
+    };
+    let mut out = Vec::with_capacity(highlights.len() + 3);
+    // Start of the part of `range` not yet emitted.
+    let mut pos = range.start;
+    for (r, style) in highlights {
+        if r.end <= range.start {
+            out.push((r, style));
+            continue;
+        }
+        if r.start >= range.end {
+            if pos < range.end {
+                out.push((pos..range.end, with_bg(HighlightStyle::default())));
+                pos = range.end;
+            }
+            out.push((r, style));
+            continue;
+        }
+        if r.start < range.start {
+            out.push((r.start..range.start, style));
+        }
+        let (from, to) = (r.start.max(range.start), r.end.min(range.end));
+        if pos < from {
+            out.push((pos..from, with_bg(HighlightStyle::default())));
+        }
+        out.push((from..to, with_bg(style)));
+        pos = to;
+        if r.end > range.end {
+            out.push((range.end..r.end, style));
+        }
+    }
+    if pos < range.end {
+        out.push((pos..range.end, with_bg(HighlightStyle::default())));
     }
     out
 }
@@ -1657,11 +2234,94 @@ fn format_bytes(n: u64) -> String {
 mod tests {
     use super::*;
 
+    fn display(bytes: &[u8]) -> String {
+        DisplayLine::new(bytes).text
+    }
+
+    fn copied(bytes: &[u8]) -> String {
+        let mut out = String::new();
+        push_copy_text(&mut out, bytes);
+        out
+    }
+
     #[test]
     fn display_text_cleans_lines() {
-        assert_eq!(display_text(b"\x1b[31mred\x1b[0m\tx"), "red x");
-        assert_eq!(display_text(b"a\x00b"), "a·b");
-        assert_eq!(display_text(&[0xff, b'a']), "\u{fffd}a");
+        assert_eq!(display(b"\x1b[31mred\x1b[0m\tx"), "red x");
+        assert_eq!(display(b"a\x00b"), "a·b");
+        assert_eq!(display(&[0xff, b'a']), "\u{fffd}a");
+        assert_eq!(display(b"a\x1bb"), "ab");
+        let long = vec![b'x'; MAX_COLS + 10];
+        let text = display(&long);
+        assert_eq!(text.chars().count(), MAX_COLS + 1);
+        assert!(text.ends_with('…'));
+        assert_eq!(display(&vec![b'x'; MAX_COLS]).chars().count(), MAX_COLS);
+    }
+
+    #[test]
+    fn display_maps_back_to_raw_bytes() {
+        // "\x1b[1m" (4 bytes) hidden, the tab after "ab" shown as 2 spaces, "é" is 2 bytes.
+        let raw = "\x1b[1mab\tcé!".as_bytes();
+        let d = DisplayLine::new(raw);
+        assert_eq!(d.text, "ab  cé!");
+        assert_eq!(d.raw_offset(0, raw.len()), 4); // 'a'
+        assert_eq!(d.raw_offset(2, raw.len()), 6); // first space -> the tab
+        assert_eq!(d.raw_offset(3, raw.len()), 6); // second space -> the tab
+        assert_eq!(d.raw_offset(4, raw.len()), 7); // 'c'
+        assert_eq!(d.raw_offset(5, raw.len()), 8); // 'é'
+        assert_eq!(d.raw_offset(7, raw.len()), 10); // '!'
+        assert_eq!(d.raw_offset(d.text.len(), raw.len()), raw.len());
+        assert_eq!(d.display_offset(0), 0);
+        assert_eq!(d.display_offset(6), 2);
+        assert_eq!(d.display_offset(7), 4);
+        assert_eq!(d.display_offset(raw.len()), d.text.len());
+
+        // The ellipsis of a cut line stands for the rest of it.
+        let long = vec![b'x'; MAX_COLS + 10];
+        let d = DisplayLine::new(&long);
+        let ellipsis = d.text.len() - '…'.len_utf8();
+        assert_eq!(d.raw_offset(ellipsis, long.len()), long.len());
+    }
+
+    #[test]
+    fn copy_keeps_text_and_tabs_but_drops_control_characters() {
+        assert_eq!(copied(b"\x1b[31mERROR\x1b[0m\tdisk full"), "ERROR\tdisk full");
+        // A carriage return or a bracketed-paste end marker could run a command
+        // when pasted into a terminal.
+        assert_eq!(copied(b"ls\x1b[201~\rrm -rf ~\r"), "lsrm -rf ~");
+        assert_eq!(copied(b"a\x00b\x7fc"), "abc");
+        assert_eq!(copied(&[b'o', 0xff, b'k']), "o\u{fffd}k");
+        let long = vec![b'y'; MAX_COLS * 5];
+        assert_eq!(copied(&long).len(), long.len());
+    }
+
+    #[test]
+    fn finds_words() {
+        let text = "id=42 user_name:bob";
+        assert_eq!(&text[word_range(text, 0)], "id");
+        assert_eq!(&text[word_range(text, 1)], "id");
+        assert_eq!(&text[word_range(text, 2)], "=");
+        assert_eq!(&text[word_range(text, 8)], "user_name");
+        assert_eq!(&text[word_range(text, 17)], "bob");
+        assert_eq!(word_range(text, text.len()), text.len()..text.len());
+    }
+
+    #[test]
+    fn selection_overlays_existing_highlights() {
+        let bold = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        };
+        let bg = gpui::red();
+        let out = overlay_background(vec![(2..4, bold), (8..10, bold)], 3..9, bg);
+        let ranges: Vec<_> = out.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(ranges, vec![2..3, 3..4, 4..8, 8..9, 9..10]);
+        let has_bg: Vec<_> = out.iter().map(|(_, s)| s.background_color.is_some()).collect();
+        assert_eq!(has_bg, vec![false, true, true, true, false]);
+        assert_eq!(out[1].1.font_weight, Some(FontWeight::BOLD));
+
+        let out = overlay_background(vec![], 0..5, bg);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 0..5);
     }
 
     #[test]

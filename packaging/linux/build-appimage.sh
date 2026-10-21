@@ -17,6 +17,8 @@ install -m755 "$bin" "$appdir/usr/bin/logship"
 install -m644 "$root/packaging/linux/logship.desktop" "$appdir/usr/share/applications/"
 install -m644 "$root/packaging/linux/logship.svg" "$appdir/usr/share/icons/hicolor/scalable/apps/"
 cp "$root/packaging/linux/logship.desktop" "$root/packaging/linux/logship.svg" "$appdir/"
+install -Dm644 -t "$appdir/usr/share/licenses/logship" \
+  "$root/LICENSE" "$root/assets/fonts/LICENSE-NordwandMono.txt"
 ln -s logship.svg "$appdir/.DirIcon"
 
 # Bundle the xkbcommon libraries, which are not installed everywhere.

@@ -1,8 +1,11 @@
 mod decorations;
 mod index;
 mod search;
+mod session;
+mod settings;
 mod theme;
 mod view;
+mod workspace;
 
 use std::path::PathBuf;
 
@@ -11,20 +14,35 @@ use gpui::{
     WindowOptions, prelude::*, px, size,
 };
 
+use session::{RecentFiles, Session};
 use view::{
-    CopyLine, FocusSearch, LogView, NextMatch, Open, PrevMatch, Quit, ToggleCase, ToggleFilterMode,
-    ToggleFollow, ToggleRegex, ToggleTheme,
+    CloseTab, Copy, FocusSearch, NewTab, NextMatch, NextTab, Open, OpenSettings, PrevMatch, PrevTab,
+    Quit, SelectAll, ToggleCase, ToggleFilterMode, ToggleFollow, ToggleRegex, ToggleTheme,
 };
+use workspace::Workspace;
 
 fn main() {
-    let path = std::env::args_os().nth(1).map(PathBuf::from);
+    let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let session = Session::load();
 
     Application::new().run(move |cx: &mut App| {
+        settings::load_bundled_fonts(cx);
+        cx.set_global(session.settings.clone());
+        cx.set_global(RecentFiles(session.recent.clone()));
+
         cx.bind_keys([
             KeyBinding::new("secondary-o", Open, None),
+            KeyBinding::new("secondary-t", NewTab, None),
+            KeyBinding::new("secondary-w", CloseTab, None),
+            KeyBinding::new("ctrl-tab", NextTab, None),
+            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+            KeyBinding::new("secondary-shift-]", NextTab, None),
+            KeyBinding::new("secondary-shift-[", PrevTab, None),
+            KeyBinding::new("secondary-,", OpenSettings, None),
             KeyBinding::new("secondary-q", Quit, None),
             KeyBinding::new("secondary-f", FocusSearch, None),
-            KeyBinding::new("secondary-c", CopyLine, None),
+            KeyBinding::new("secondary-c", Copy, None),
+            KeyBinding::new("secondary-a", SelectAll, None),
             KeyBinding::new("secondary-g", NextMatch, None),
             KeyBinding::new("secondary-shift-g", PrevMatch, None),
             KeyBinding::new("secondary-shift-d", ToggleTheme, None),
@@ -37,16 +55,26 @@ fn main() {
         cx.set_menus(vec![
             Menu {
                 name: "logship".into(),
-                items: vec![MenuItem::action("Quit logship", Quit)],
+                items: vec![
+                    MenuItem::action("Settings…", OpenSettings),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit logship", Quit),
+                ],
             },
             Menu {
                 name: "File".into(),
-                items: vec![MenuItem::action("Open…", Open)],
+                items: vec![
+                    MenuItem::action("New Tab", NewTab),
+                    MenuItem::action("Open…", Open),
+                    MenuItem::separator(),
+                    MenuItem::action("Close Tab", CloseTab),
+                ],
             },
             Menu {
                 name: "Edit".into(),
                 items: vec![
-                    MenuItem::action("Copy Line", CopyLine),
+                    MenuItem::action("Copy", Copy),
+                    MenuItem::action("Select All", SelectAll),
                     MenuItem::separator(),
                     MenuItem::action("Find", FocusSearch),
                     MenuItem::action("Next Match", NextMatch),
@@ -62,6 +90,9 @@ fn main() {
                 items: vec![
                     MenuItem::action("Follow Tail", ToggleFollow),
                     MenuItem::action("Toggle Light / Dark", ToggleTheme),
+                    MenuItem::separator(),
+                    MenuItem::action("Next Tab", NextTab),
+                    MenuItem::action("Previous Tab", PrevTab),
                 ],
             },
         ]);
@@ -82,16 +113,7 @@ fn main() {
                     window_decorations: Some(decorations::preferred()),
                     ..Default::default()
                 },
-                |window, cx| {
-                    cx.new(|cx| {
-                        let mut view = LogView::new(cx);
-                        window.focus(view.list_focus());
-                        if let Some(path) = path {
-                            view.open(path, cx);
-                        }
-                        view
-                    })
-                },
+                |window, cx| cx.new(|cx| Workspace::new(&session, paths, window, cx)),
             )
             .expect("failed to open window");
         window
