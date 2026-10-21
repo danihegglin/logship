@@ -2983,6 +2983,8 @@ dependencies = [
  "memmap2",
  "rayon",
  "regex",
+ "serde",
+ "serde_json",
  "wayland-client",
 ]
 
