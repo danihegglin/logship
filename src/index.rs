@@ -151,8 +151,18 @@ impl Delta {
 
 impl LogIndex {
     pub fn open(path: &Path, progress: &AtomicU64) -> std::io::Result<LogIndex> {
+        // Only regular files can be mapped. Checked before opening too, because
+        // opening a FIFO blocks until something writes to it.
+        let not_a_file = || std::io::Error::other("not a regular file");
+        if !std::fs::metadata(path)?.is_file() {
+            return Err(not_a_file());
+        }
         let file = File::open(path)?;
-        let len = file.metadata()?.len();
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(not_a_file());
+        }
+        let len = meta.len();
         let map = map_file(&file, len)?;
         let data: &[u8] = map.as_deref().map(|m| &m[..]).unwrap_or(&[]);
         let (starts, levels) = index_bytes(data, 0, progress);
@@ -369,6 +379,20 @@ mod tests {
         assert_eq!(idx.level_counts[Level::Error as usize], 1);
         assert!(idx.scan_append().unwrap().is_none());
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_what_is_not_a_regular_file() {
+        let dir = std::env::temp_dir().join(format!("logship-special-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(LogIndex::open(&dir, &AtomicU64::new(0)).is_err());
+
+        // Opening a FIFO with no writer would block forever.
+        let fifo = dir.join("fifo.log");
+        if std::process::Command::new("mkfifo").arg(&fifo).status().is_ok_and(|s| s.success()) {
+            assert!(LogIndex::open(&fifo, &AtomicU64::new(0)).is_err());
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

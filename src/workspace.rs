@@ -19,7 +19,7 @@ use crate::{
     theme::Theme,
     view::{
         CloseTab, LogView, LogViewEvent, NewTab, NextTab, Open, OpenSettings, PrevTab,
-        ToggleNewestFirst, ToggleTheme,
+        ToggleNewestFirst, ToggleTheme, printable,
     },
 };
 
@@ -246,10 +246,12 @@ impl Workspace {
 
     fn tab_name(&self, tab: &Tab, cx: &App) -> String {
         match self.tab_path(tab, cx) {
-            Some(path) => path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string()),
+            Some(path) => printable(
+                &path
+                    .file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy(),
+            ),
             None => "New Tab".into(),
         }
     }

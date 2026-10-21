@@ -366,6 +366,7 @@ impl LogView {
 
     fn set_index(&mut self, index: LogIndex, ms: u128, cx: &mut Context<Self>) {
         let reopened = self.index.as_ref().is_some_and(|i| i.path == index.path);
+        let lines = index.line_count();
         self.index = Some(Arc::new(index));
         self.index_ms = ms;
         self.selection = None;
@@ -376,6 +377,8 @@ impl LogView {
             self.h_offset = 0.;
             self.selected = None;
         }
+        // A reopened file can be shorter than before (rotated or truncated).
+        self.selected = self.selected.filter(|&line| line < lines);
         self.current_hit = None;
         self.rows = None;
         self.hits = Arc::default();
@@ -850,7 +853,7 @@ impl LogView {
         if count == 0 {
             return None;
         }
-        let y = f32::from(pos.y - bounds.top()).clamp(0., f32::from(bounds.size.height) - 1.);
+        let y = f32::from(pos.y - bounds.top()).clamp(0., (f32::from(bounds.size.height) - 1.).max(0.));
         let row = (self.top_row + ((y + self.sub_px) / self.line_h) as usize).min(count - 1);
         let line = self.row_to_line(row)?;
         let bytes = index.line(line);
@@ -1055,11 +1058,13 @@ impl LogView {
             let from = if line == start.line { start.byte.min(bytes.len()) } else { 0 };
             let to = if line == end.line { end.byte.min(bytes.len()) } else { bytes.len() };
             if lines > 0 {
+                if out.len() >= MAX_COPY {
+                    return Some((out, lines, true));
+                }
                 out.push('\n');
             }
-            push_copy_text(&mut out, &bytes[from..to.max(from)]);
             lines += 1;
-            if out.len() > MAX_COPY {
+            if !push_copy_text(&mut out, &bytes[from..to.max(from)], MAX_COPY) {
                 return Some((out, lines, true));
             }
         }
@@ -1069,13 +1074,16 @@ impl LogView {
     /// Copies the selected text, or the whole selected line if no text is selected.
     fn copy(&mut self, cx: &mut Context<Self>) {
         let copied = self.selected_text().or_else(|| {
-            let (index, line) = (self.index.as_ref()?, self.selected?);
+            let index = self.index.as_ref()?;
+            let line = self.selected.filter(|&line| line < index.line_count())?;
             let mut text = String::new();
-            push_copy_text(&mut text, index.line(line));
-            Some((text, 1, false))
+            let complete = push_copy_text(&mut text, index.line(line), MAX_COPY);
+            Some((text, 1, !complete))
         });
         let Some((text, lines, truncated)) = copied else { return };
-        let note = if truncated {
+        let note = if truncated && lines == 1 {
+            format!("Copied the first {} of the line", format_bytes(text.len() as u64))
+        } else if truncated {
             format!("Copied the first {} lines ({})", format_int(lines), format_bytes(text.len() as u64))
         } else if lines > 1 {
             format!("Copied {} lines", format_int(lines))
@@ -1776,7 +1784,7 @@ impl LogView {
     fn render_status(&self, t: &Theme) -> impl IntoElement + use<> {
         let mut left: Vec<String> = Vec::new();
         if let Some(index) = &self.index {
-            left.push(index.path.display().to_string());
+            left.push(printable(&index.path.to_string_lossy()));
             left.push(format_bytes(index.len));
             left.push(format!("{} lines", format_int(index.line_count())));
             left.push(format!("indexed in {} ms", self.index_ms));
@@ -1834,7 +1842,7 @@ impl LogView {
                         loading
                             .path
                             .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
+                            .map(|n| printable(&n.to_string_lossy()))
                             .unwrap_or_default()
                     )),
                 )
@@ -1893,11 +1901,8 @@ impl LogView {
                 d.child(div().px_2().text_xs().text_color(t.text_muted).child("Recent files"))
             })
             .children(recent.into_iter().take(10).enumerate().map(|(i, path)| {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                let dir = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                let name = printable(&path.file_name().unwrap_or(path.as_os_str()).to_string_lossy());
+                let dir = printable(&path.parent().unwrap_or(Path::new("")).to_string_lossy());
                 div()
                     .id(("recent", i))
                     .flex()
@@ -2133,14 +2138,21 @@ impl DisplayLine {
 
 /// Appends a raw line slice as copied text: what is shown, but with tabs kept and
 /// nothing cut short. Escape sequences and other control characters are dropped,
-/// so pasting into a terminal can't run anything hidden in the log.
-fn push_copy_text(out: &mut String, bytes: &[u8]) {
+/// so pasting into a terminal can't run anything hidden in the log. Stops before
+/// `out` grows past `limit` bytes and returns false if it had to.
+fn push_copy_text(out: &mut String, bytes: &[u8], limit: usize) -> bool {
+    let mut complete = true;
     for_each_visible_char(bytes, |c, _| {
         if c == '\t' || !c.is_control() {
+            if out.len() + c.len_utf8() > limit {
+                complete = false;
+                return false;
+            }
             out.push(c);
         }
         true
     });
+    complete
 }
 
 /// The character boundary in a shaped line closest to `x`.
@@ -2284,6 +2296,19 @@ fn compute_markers(index: &LogIndex, rows: Option<&[usize]>, hits: Option<&[usiz
     out
 }
 
+/// A file name or path for display: control and bidi formatting characters are
+/// shown as `·`, so a crafted name can't break the layout or reorder what is
+/// shown around it (in the window title too, where the system applies bidi).
+pub fn printable(text: &str) -> String {
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}')
+            || ('\u{202a}'..='\u{202e}').contains(&c)
+            || ('\u{2066}'..='\u{2069}').contains(&c)
+    };
+    text.chars().map(|c| if hidden(c) { '·' } else { c }).collect()
+}
+
 fn format_int(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -2330,8 +2355,14 @@ mod tests {
 
     fn copied(bytes: &[u8]) -> String {
         let mut out = String::new();
-        push_copy_text(&mut out, bytes);
+        assert!(push_copy_text(&mut out, bytes, usize::MAX));
         out
+    }
+
+    #[test]
+    fn printable_names_hide_controls_and_bidi_overrides() {
+        assert_eq!(printable("we\u{202e}gol.exe\nx\x1b[31m.log"), "we·gol.exe·x·[31m.log");
+        assert_eq!(printable("\u{2066}a\u{2069} 日本 é.log"), "·a· 日本 é.log");
     }
 
     #[test]
@@ -2399,6 +2430,128 @@ mod tests {
         assert!(before(p(2, 0), p(1, 9), true));
         assert!(before(p(2, 3), p(2, 7), true));
         assert!(!before(p(2, 7), p(2, 3), true));
+    }
+
+    /// Small deterministic RNG for the property tests below.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+    }
+
+    /// Iterations for the property tests; raise with LOGSHIP_FUZZ_ITERS for a long run.
+    fn fuzz_iters(default: usize) -> usize {
+        std::env::var("LOGSHIP_FUZZ_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// A raw log line built from pieces that stress the display and copy code:
+    /// escape sequences, control characters, invalid and truncated UTF-8, wide,
+    /// combining, zero-width and bidi characters, tabs, level words.
+    fn hostile_line(rng: &mut Rng) -> Vec<u8> {
+        const PIECES: &[&[u8]] = &[
+            b"a", b"Z", b"0", b" ", b"\t", b"\x1b", b"\x1b[", b"[31m", b"\x1b[0m", b"\x1b]0;t\x07",
+            b";", b"~", b"\r", b"\x00", b"\x7f", b"\x07", b"\xff", b"\xfe", b"\xc0", b"\x80",
+            b"\xe6\x97", "é".as_bytes(), "日本".as_bytes(), "😀".as_bytes(), "\u{202e}".as_bytes(),
+            "\u{200b}".as_bytes(), "e\u{301}".as_bytes(), b"\xc2\x9b", b"ERROR", b"level=warn",
+            b"[info]", b"id_42", b"..", b"=",
+        ];
+        let len = match rng.below(10) {
+            0 => rng.below(6000),
+            1 => 0,
+            _ => rng.below(80),
+        };
+        let mut out = Vec::new();
+        for _ in 0..len {
+            out.extend_from_slice(PIECES[rng.below(PIECES.len())]);
+        }
+        out
+    }
+
+    #[test]
+    fn display_and_copy_hold_their_invariants_on_hostile_lines() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..fuzz_iters(3000) {
+            let raw = hostile_line(&mut rng);
+            let d = DisplayLine::new(&raw);
+            // Shown text: no control characters, capped length, monotonic map.
+            assert!(!d.text.chars().any(|c| c.is_control()), "{:?}", d.text);
+            assert!(d.text.chars().count() <= MAX_COLS + 1);
+            let mut prev = None;
+            for &(disp, r) in &d.map {
+                assert!(d.text.is_char_boundary(disp));
+                assert!(r <= raw.len());
+                if let Some((pd, pr)) = prev {
+                    assert!(disp > pd && r >= pr);
+                }
+                prev = Some((disp, r));
+            }
+            // Every boundary maps to a raw offset and back without leaving bounds.
+            for ix in (0..=d.text.len()).filter(|&i| d.text.is_char_boundary(i)) {
+                let r = d.raw_offset(ix, raw.len());
+                assert!(r <= raw.len());
+                let back = d.display_offset(r);
+                assert!(back <= d.text.len() && d.text.is_char_boundary(back));
+                let w = word_range(&d.text, ix);
+                assert!(w.start <= w.end && w.end <= d.text.len());
+                assert!(d.text.is_char_boundary(w.start) && d.text.is_char_boundary(w.end));
+            }
+            // Copied text never carries control characters other than tabs.
+            let c = copied(&raw);
+            assert!(c.chars().all(|ch| ch == '\t' || !ch.is_control()), "{c:?}");
+            // Copying any slice of the line is safe, wherever it is cut.
+            let (a, b) = (rng.below(raw.len() + 1), rng.below(raw.len() + 1));
+            let _ = copied(&raw[a.min(b)..a.max(b)]);
+        }
+    }
+
+    #[test]
+    fn overlay_background_keeps_highlights_sorted_and_disjoint() {
+        let mut rng = Rng(42);
+        for _ in 0..fuzz_iters(3000) {
+            let len = rng.below(200) + 1;
+            let mut highlights = Vec::new();
+            let mut pos = 0;
+            while pos < len && highlights.len() < 8 {
+                let start = pos + rng.below(5);
+                let end = (start + 1 + rng.below(10)).min(len);
+                if start >= end {
+                    break;
+                }
+                highlights.push((start..end, HighlightStyle::default()));
+                pos = end;
+            }
+            let (a, b) = (rng.below(len + 1), rng.below(len + 1));
+            let range = a.min(b)..a.max(b);
+            if range.is_empty() {
+                continue;
+            }
+            let out = overlay_background(highlights.clone(), range.clone(), gpui::red());
+            let mut last_end = 0;
+            for (r, style) in &out {
+                assert!(r.start < r.end && r.start >= last_end && r.end <= len, "{out:?}");
+                last_end = r.end;
+                let inside = r.start >= range.start && r.end <= range.end;
+                assert_eq!(style.background_color.is_some(), inside, "{out:?}");
+            }
+            // The selected range is fully covered.
+            let covered: usize = out
+                .iter()
+                .filter(|(_, s)| s.background_color.is_some())
+                .map(|(r, _)| r.len())
+                .sum();
+            assert_eq!(covered, range.len());
+        }
     }
 
     #[test]
