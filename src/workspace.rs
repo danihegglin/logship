@@ -18,7 +18,8 @@ use crate::{
     settings::{self, BUNDLED_FONT, MAX_FONT_SIZE, MIN_FONT_SIZE, Settings},
     theme::Theme,
     view::{
-        CloseTab, LogView, LogViewEvent, NewTab, NextTab, Open, OpenSettings, PrevTab, ToggleTheme,
+        CloseTab, LogView, LogViewEvent, NewTab, NextTab, Open, OpenSettings, PrevTab,
+        ToggleNewestFirst, ToggleTheme,
     },
 };
 
@@ -478,6 +479,26 @@ impl Workspace {
                     )
                     .child(button("font-larger", "+".into(), false).on_click(step_size(0.5))),
             )
+            .child(label("Order"))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        button("oldest-first", "Oldest first".into(), !s.newest_first).on_click(
+                            |_, _, cx| {
+                                cx.update_global::<Settings, _>(|s, _| s.newest_first = false)
+                            },
+                        ),
+                    )
+                    .child(
+                        button("newest-first", "Newest first".into(), s.newest_first).on_click(
+                            |_, _, cx| {
+                                cx.update_global::<Settings, _>(|s, _| s.newest_first = true)
+                            },
+                        ),
+                    ),
+            )
             .child(label("Theme"))
             .child(
                 div()
@@ -554,6 +575,9 @@ impl Render for Workspace {
                 }))
                 .on_action(|_: &ToggleTheme, _, cx| {
                     cx.update_global::<Settings, _>(|s, _| s.dark = !s.dark)
+                })
+                .on_action(|_: &ToggleNewestFirst, _, cx| {
+                    cx.update_global::<Settings, _>(|s, _| s.newest_first = !s.newest_first)
                 })
                 .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                     for path in paths.paths() {
