@@ -76,6 +76,9 @@ fn main() {
                         ..Default::default()
                     }),
                     focus: true,
+                    // Must match packaging/linux/logship.desktop: GNOME and KDE use it
+                    // (the Wayland app_id, the X11 WM_CLASS) to find the app's name and icon.
+                    app_id: Some("logship".into()),
                     window_decorations: Some(decorations::preferred()),
                     ..Default::default()
                 },
