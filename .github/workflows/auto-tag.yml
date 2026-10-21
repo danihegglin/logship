@@ -8,10 +8,15 @@ name: Auto tag
 # trigger. Pushing a tag by hand (for example a new minor or major version) still
 # releases through release.yml as before. Put [skip ci] in a commit message to
 # push to main without releasing.
+#
+# GitHub occasionally drops a push event, so no release starts. "Run workflow"
+# on this workflow (Actions tab, branch main) then tags and releases main's
+# latest commit the same way; it does nothing if that commit is already tagged.
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 # One release at a time, so two quick pushes can't compute the same tag.
 concurrency:
