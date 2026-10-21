@@ -89,7 +89,7 @@ Every tagged release publishes builds from GitHub Actions (`.github/workflows/re
 
 Linux and Windows builds are available for x86_64 and aarch64. The Linux builds need glibc 2.17 or newer (RHEL/CentOS 7, Ubuntu 18.04 and later) and a Vulkan driver. The macOS app is ad-hoc signed but not notarized, so the first time you open it, right-click it and choose **Open**.
 
-Every push to `main` is released automatically as the next patch version (`.github/workflows/auto-tag.yml`): if the newest tag is `v0.2.1`, the push is tagged `v0.2.2` and a GitHub release with every file attached is published. Put `[skip ci]` in the commit message to push without releasing. For a new minor or major version, push a tag yourself (`git tag v0.3.0 && git push origin v0.3.0`); later pushes continue from it (`v0.3.1`, …). The tag sets the version, so `Cargo.toml` doesn't need a bump first, and a short tag like `v0.2` becomes `0.2.0`. Pull requests only build and test, without packaging.
+Every push to `main` is released automatically as the next patch version (`.github/workflows/auto-tag.yml`): if the newest tag is `v0.2.1`, the push is tagged `v0.2.2` and a GitHub release with every file attached is published. Put `[skip ci]` in the commit message to push without releasing. If a push to `main` didn't start a release (GitHub occasionally drops the event), open the **Auto tag** workflow in the Actions tab and click **Run workflow** on `main`. For a new minor or major version, push a tag yourself (`git tag v0.3.0 && git push origin v0.3.0`); later pushes continue from it (`v0.3.1`, …). The tag sets the version, so `Cargo.toml` doesn't need a bump first, and a short tag like `v0.2` becomes `0.2.0`. Pull requests only build and test, without packaging.
 
 ## 🗺️ Keys
 
