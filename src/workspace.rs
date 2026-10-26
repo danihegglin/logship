@@ -32,6 +32,30 @@ struct Tab {
     _events: Subscription,
 }
 
+/// Shows a tab's full file path while the pointer rests on the tab.
+struct PathTooltip {
+    text: SharedString,
+    theme: Theme,
+}
+
+impl Render for PathTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        div()
+            .max_w(px(640.))
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(t.surface)
+            .border_1()
+            .border_color(t.border)
+            .shadow_md()
+            .text_xs()
+            .text_color(t.text)
+            .child(self.text.clone())
+    }
+}
+
 pub struct Workspace {
     tabs: Vec<Tab>,
     active: usize,
@@ -264,6 +288,10 @@ impl Workspace {
             .enumerate()
             .map(|(i, tab)| {
                 let active = i == self.active;
+                let full_path = self
+                    .tab_path(tab, cx)
+                    .map(|path| SharedString::from(printable(&path.to_string_lossy())));
+                let t = *t;
                 div()
                     .id(("tab", i))
                     .flex()
@@ -299,6 +327,12 @@ impl Workspace {
                             this.close_tab(i, window, cx)
                         }),
                     )
+                    .when_some(full_path, |d, path| {
+                        d.tooltip(move |_, cx| {
+                            let text = path.clone();
+                            cx.new(|_| PathTooltip { text, theme: t }).into()
+                        })
+                    })
                     .child(
                         div()
                             .flex_1()
