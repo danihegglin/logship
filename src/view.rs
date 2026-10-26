@@ -41,6 +41,7 @@ actions!(
     logship,
     [
         Open,
+        OpenContainer,
         Quit,
         FocusSearch,
         ToggleTheme,
@@ -1750,6 +1751,13 @@ impl LogView {
                     .child("Open…")
                     .on_click(|_: &ClickEvent, window, cx| window.dispatch_action(Box::new(Open), cx)),
             )
+            .child(
+                chip("open-container", false, t)
+                    .child("Containers…")
+                    .on_click(|_: &ClickEvent, window, cx| {
+                        window.dispatch_action(Box::new(OpenContainer), cx)
+                    }),
+            )
             .child(search_box)
             .child(mode)
             .child(levels)
@@ -1872,6 +1880,10 @@ impl LogView {
                         .text_color(t.text_muted)
                         .child(format!("Open a log file with {}O or drop it here", mod_key())),
                 )
+                .child(div().text_color(t.text_muted).child(format!(
+                    "or open the logs of a Docker or Podman container with {}",
+                    if cfg!(target_os = "macos") { "⇧⌘O" } else { "Ctrl+Shift+O" }
+                )))
                 .when_some(self.error.clone(), |d, err| {
                     d.child(div().mt_2().text_color(t.error_text).child(err))
                 })
