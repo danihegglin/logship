@@ -1,5 +1,7 @@
+mod containers;
 mod decorations;
 mod index;
+mod picker;
 mod search;
 mod session;
 mod settings;
@@ -16,9 +18,9 @@ use gpui::{
 
 use session::{RecentFiles, Session};
 use view::{
-    CloseTab, Copy, FocusSearch, NewTab, NextMatch, NextTab, Open, OpenSettings, PrevMatch,
-    PrevTab, Quit, SelectAll, ToggleCase, ToggleFilterMode, ToggleFollow, ToggleNewestFirst,
-    ToggleRegex, ToggleTheme,
+    CloseTab, Copy, FocusSearch, NewTab, NextMatch, NextTab, Open, OpenContainer, OpenSettings,
+    PrevMatch, PrevTab, Quit, SelectAll, ToggleCase, ToggleFilterMode, ToggleFollow,
+    ToggleNewestFirst, ToggleRegex, ToggleTheme,
 };
 use workspace::Workspace;
 
@@ -33,6 +35,7 @@ fn main() {
 
         cx.bind_keys([
             KeyBinding::new("secondary-o", Open, None),
+            KeyBinding::new("secondary-shift-o", OpenContainer, None),
             KeyBinding::new("secondary-t", NewTab, None),
             KeyBinding::new("secondary-w", CloseTab, None),
             KeyBinding::new("ctrl-tab", NextTab, None),
@@ -68,6 +71,7 @@ fn main() {
                 items: vec![
                     MenuItem::action("New Tab", NewTab),
                     MenuItem::action("Open…", Open),
+                    MenuItem::action("Open Container Logs…", OpenContainer),
                     MenuItem::separator(),
                     MenuItem::action("Close Tab", CloseTab),
                 ],

@@ -1,5 +1,6 @@
-//! The window's root view: one tab per log file, the settings panel, and the
-//! title bar on desktops that leave it to the app.
+//! The window's root view: one tab per log file or container, the settings
+//! panel, the container picker, and the title bar on desktops that leave it to
+//! the app.
 //!
 //! The open tabs, recent files and settings are saved to the session file on
 //! every change, and the tabs are reopened on the next start.
@@ -13,13 +14,15 @@ use gpui::{
 };
 
 use crate::{
+    containers::{self, Container, LogStream},
     decorations,
+    picker::{ContainerPicker, PickerEvent},
     session::{self, RecentFiles, Session},
     settings::{self, BUNDLED_FONT, MAX_FONT_SIZE, MIN_FONT_SIZE, Settings},
     theme::Theme,
     view::{
-        CloseTab, LogView, LogViewEvent, NewTab, NextTab, Open, OpenSettings, PrevTab,
-        ToggleNewestFirst, ToggleTheme, printable,
+        CloseTab, LogView, LogViewEvent, NewTab, NextTab, Open, OpenContainer, OpenSettings,
+        PrevTab, ToggleNewestFirst, ToggleTheme, printable,
     },
 };
 
@@ -29,6 +32,8 @@ const TOOLBAR_H: f32 = 44.;
 
 struct Tab {
     view: Entity<LogView>,
+    /// Set when the tab shows a container's logs; dropping it stops the stream.
+    stream: Option<LogStream>,
     _events: Subscription,
 }
 
@@ -62,10 +67,12 @@ pub struct Workspace {
     settings_open: bool,
     settings_focus: FocusHandle,
     font_choices: Vec<String>,
+    picker: Option<(Entity<ContainerPicker>, Subscription)>,
     window_title: String,
     /// Set while the left button is held on the client-side title bar.
     pub(crate) titlebar_drag: bool,
     _settings_changed: Subscription,
+    _quit: Subscription,
 }
 
 impl Workspace {
@@ -82,11 +89,20 @@ impl Workspace {
             settings_open: false,
             settings_focus: cx.focus_handle(),
             font_choices: Vec::new(),
+            picker: None,
             window_title: String::new(),
             titlebar_drag: false,
             _settings_changed: cx.observe_global::<Settings>(|this, cx| {
                 this.save(cx);
                 cx.notify();
+            }),
+            // Stop the container log streams and delete their temporary files.
+            _quit: cx.on_app_quit(|this, _| {
+                for tab in &mut this.tabs {
+                    tab.stream = None;
+                }
+                containers::remove_log_dir();
+                async {}
             }),
         };
         for path in session.tabs.iter().filter(|p| p.is_file()) {
@@ -116,6 +132,7 @@ impl Workspace {
         }
         self.tabs.push(Tab {
             view,
+            stream: None,
             _events: events,
         });
         self.tabs.len() - 1
@@ -129,6 +146,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
+            LogViewEvent::Opened(path) if containers::is_stream_file(path) => cx.notify(),
             LogViewEvent::Opened(path) => {
                 session::push_recent(&mut cx.global_mut::<RecentFiles>().0, path);
                 self.save(cx);
@@ -190,6 +208,69 @@ impl Workspace {
         .detach();
     }
 
+    fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker.take().is_some() {
+            self.focus_active(window, cx);
+        } else {
+            self.settings_open = false;
+            let picker = cx.new(ContainerPicker::new);
+            let events =
+                cx.subscribe_in(&picker, window, |this, _, event, window, cx| match event {
+                    PickerEvent::Picked(container) => this.open_container(container, window, cx),
+                    PickerEvent::Dismissed => this.toggle_picker(window, cx),
+                });
+            window.focus(picker.read(cx).focus_handle());
+            self.picker = Some((picker, events));
+        }
+        cx.notify();
+    }
+
+    /// Shows a container's logs: switches to its tab if it is already open,
+    /// otherwise starts streaming them into the current tab if that is empty, or
+    /// into a new tab.
+    fn open_container(
+        &mut self,
+        container: &Container,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.tabs.iter().position(|tab| {
+            tab.stream.as_ref().is_some_and(|s| {
+                s.container.engine == container.engine && s.container.id == container.id
+            })
+        });
+        if let Some(i) = open {
+            self.picker = None;
+            self.activate(i, window, cx);
+            return;
+        }
+        let stream = match LogStream::start(container) {
+            Ok(stream) => stream,
+            Err(err) => {
+                if let Some((picker, _)) = &self.picker {
+                    let msg = format!("Could not open the logs of {}: {err}", container.name);
+                    picker.update(cx, |picker, cx| picker.set_error(msg, cx));
+                }
+                return;
+            }
+        };
+        self.picker = None;
+        let path = stream.path().to_path_buf();
+        let current_is_empty = self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| self.tab_path(tab, cx).is_none());
+        if !current_is_empty {
+            self.active = self.add_tab(None, window, cx);
+        }
+        let tab = &mut self.tabs[self.active];
+        tab.stream = Some(stream);
+        tab.view.update(cx, |view, cx| view.open(path, cx));
+        self.focus_active(window, cx);
+        self.save(cx);
+        cx.notify();
+    }
+
     fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active = self.add_tab(None, window, cx);
         self.focus_active(window, cx);
@@ -238,6 +319,7 @@ impl Workspace {
 
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
+        self.picker = None;
         if self.settings_open {
             let current = cx.global::<Settings>().font_family.clone();
             self.font_choices = settings::font_choices(&current, cx);
@@ -252,6 +334,10 @@ impl Workspace {
         let mut tabs = Vec::new();
         let mut active = 0;
         for (i, tab) in self.tabs.iter().enumerate() {
+            // Container logs live in temporary files that are gone after a restart.
+            if tab.stream.is_some() {
+                continue;
+            }
             if let Some(path) = self.tab_path(tab, cx) {
                 if i < self.active {
                     active += 1;
@@ -269,6 +355,9 @@ impl Workspace {
     }
 
     fn tab_name(&self, tab: &Tab, cx: &App) -> String {
+        if let Some(stream) = &tab.stream {
+            return printable(&stream.container.label());
+        }
         match self.tab_path(tab, cx) {
             Some(path) => printable(
                 &path
@@ -586,6 +675,26 @@ impl Render for Workspace {
                 );
             (backdrop, self.render_settings(&settings, top, &t, cx))
         });
+        let picker = self.picker.as_ref().map(|(picker, _)| {
+            let top = decorations::title_bar_height(window) + TABBAR_H + TOOLBAR_H + 24.;
+            // Clicking outside the picker closes it.
+            div()
+                .id("picker-backdrop")
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(top))
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.toggle_picker(window, cx)
+                    }),
+                )
+                .child(picker.clone())
+        });
         let active = self.tabs[self.active].view.clone();
 
         let root =
@@ -600,6 +709,9 @@ impl Render for Workspace {
                 .text_color(t.text)
                 .text_sm()
                 .on_action(cx.listener(|this, _: &Open, window, cx| this.prompt_open(window, cx)))
+                .on_action(cx.listener(|this, _: &OpenContainer, window, cx| {
+                    this.toggle_picker(window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                 .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                     this.close_tab(this.active, window, cx)
@@ -629,7 +741,8 @@ impl Render for Workspace {
                 .child(active)
                 .when_some(settings_panel, |d, (backdrop, panel)| {
                     d.child(backdrop).child(panel)
-                });
+                })
+                .children(picker);
         decorations::frame(window, &t, root)
     }
 }
