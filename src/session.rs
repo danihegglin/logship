@@ -16,6 +16,15 @@ pub struct RecentFiles(pub Vec<PathBuf>);
 
 impl gpui::Global for RecentFiles {}
 
+/// SSH hosts logs were opened on, most recent first; offered by the remote
+/// picker.
+pub struct RecentHosts(pub Vec<String>);
+
+impl gpui::Global for RecentHosts {}
+
+/// How many recent hosts are remembered.
+pub const MAX_RECENT_HOSTS: usize = 10;
+
 /// How many recently opened files are remembered.
 pub const MAX_RECENT: usize = 20;
 
@@ -29,6 +38,8 @@ pub struct Session {
     pub active: usize,
     /// Most recently opened first.
     pub recent: Vec<PathBuf>,
+    /// SSH hosts, most recently used first.
+    pub recent_hosts: Vec<String>,
 }
 
 impl Session {
@@ -50,6 +61,7 @@ impl Session {
         let mut session: Session = serde_json::from_slice(bytes)?;
         session.settings = session.settings.sanitized();
         session.recent.truncate(MAX_RECENT);
+        session.recent_hosts.truncate(MAX_RECENT_HOSTS);
         Ok(session)
     }
 
@@ -70,6 +82,13 @@ pub fn push_recent(recent: &mut Vec<PathBuf>, path: &Path) {
     recent.retain(|p| p != path);
     recent.insert(0, path.to_path_buf());
     recent.truncate(MAX_RECENT);
+}
+
+/// Moves `host` to the front of `hosts`.
+pub fn push_recent_host(hosts: &mut Vec<String>, host: &str) {
+    hosts.retain(|h| h != host);
+    hosts.insert(0, host.to_string());
+    hosts.truncate(MAX_RECENT_HOSTS);
 }
 
 /// Writes the session readable by the user only (it lists the files they
@@ -165,6 +184,7 @@ mod tests {
             tabs: vec!["/var/log/a.log".into(), "/var/log/b.log".into()],
             active: 1,
             recent: vec!["/var/log/b.log".into()],
+            recent_hosts: vec!["me@web1".into()],
         };
         let json = serde_json::to_vec(&session).unwrap();
         assert_eq!(Session::from_json(&json).unwrap(), session);

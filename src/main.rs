@@ -2,9 +2,12 @@ mod containers;
 mod decorations;
 mod index;
 mod picker;
+mod remote_picker;
 mod search;
 mod session;
 mod settings;
+mod ssh;
+mod stream;
 mod theme;
 mod view;
 mod workspace;
@@ -16,10 +19,10 @@ use gpui::{
     WindowOptions, prelude::*, px, size,
 };
 
-use session::{RecentFiles, Session};
+use session::{RecentFiles, RecentHosts, Session};
 use view::{
-    CloseTab, Copy, FocusSearch, NewTab, NextMatch, NextTab, Open, OpenContainer, OpenSettings,
-    PrevMatch, PrevTab, Quit, SelectAll, ToggleCase, ToggleFilterMode, ToggleFollow,
+    CloseTab, Copy, FocusSearch, NewTab, NextMatch, NextTab, Open, OpenContainer, OpenRemote,
+    OpenSettings, PrevMatch, PrevTab, Quit, SelectAll, ToggleCase, ToggleFilterMode, ToggleFollow,
     ToggleNewestFirst, ToggleRegex, ToggleTheme,
 };
 use workspace::Workspace;
@@ -32,10 +35,12 @@ fn main() {
         settings::load_bundled_fonts(cx);
         cx.set_global(session.settings.clone());
         cx.set_global(RecentFiles(session.recent.clone()));
+        cx.set_global(RecentHosts(session.recent_hosts.clone()));
 
         cx.bind_keys([
             KeyBinding::new("secondary-o", Open, None),
             KeyBinding::new("secondary-shift-o", OpenContainer, None),
+            KeyBinding::new("secondary-shift-s", OpenRemote, None),
             KeyBinding::new("secondary-t", NewTab, None),
             KeyBinding::new("secondary-w", CloseTab, None),
             KeyBinding::new("ctrl-tab", NextTab, None),
@@ -72,6 +77,7 @@ fn main() {
                     MenuItem::action("New Tab", NewTab),
                     MenuItem::action("Open…", Open),
                     MenuItem::action("Open Container Logs…", OpenContainer),
+                    MenuItem::action("Open on SSH Host…", OpenRemote),
                     MenuItem::separator(),
                     MenuItem::action("Close Tab", CloseTab),
                 ],

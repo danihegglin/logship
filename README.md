@@ -62,6 +62,7 @@ Check these numbers against your own logs with `cargo run --release --example be
 - **Line cleanup.** ANSI color codes are stripped, tabs are expanded, invalid UTF-8 is shown safely, and very long lines are cut off before drawing.
 - **Exact copy.** Select text with the mouse, character by character, by word (double-click) or by line (triple-click), across as many lines as you like; dragging past the edge scrolls. Copying gives the text exactly as it is in the file, tabs included and long lines not cut short, minus the color codes and invisible control characters, so a pasted log line can't run anything hidden in it. With a filter on, only the lines you see are copied. A single copy takes at most 64 MB. On Linux the selection is also pasteable with the middle button.
 - **Container logs.** Click **Containers…** (or ⇧⌘O / Ctrl+Shift+O) to pick a running or stopped Docker or Podman container and open its logs in a tab instead of a file. Logs of running containers keep streaming in, so search, filters and Follow work as with a live file. logship runs the `docker` or `podman` command line tool, which needs to be installed.
+- **Logs on other machines over SSH.** Click **SSH…** (or ⇧⌘S / Ctrl+Shift+S), type a host (`web1`, `me@web1`, `ssh://me@web1:2222`) or pick one from `~/.ssh/config`, then browse its files starting at `/var/log` or switch to **Containers** to see the Docker and Podman containers running there. A remote file is copied in and then followed with `tail -F`, so it keeps updating, survives log rotation, and gets search, filters and Follow like a local file; container logs stream the same way. logship runs your own `ssh` client, so aliases, users, ports, jump hosts and keys from `~/.ssh/config` and the SSH agent all work. It can't type a password, so the host needs to accept a key from the agent (or an unencrypted key) and be in `known_hosts` already: if it isn't, connect once with `ssh` in a terminal. Nothing needs to be installed on the server besides `tail` and, for containers, `docker` or `podman`. Closing the tab ends the connection.
 - **Tabs.** Open several logs side by side. Open tabs and recently opened files are remembered and come back on the next start.
 - **Settings** (⚙ or ⌘,). Pick the font and size and a dark or light theme. [Nordwand Mono](https://github.com/tywr/Nordwand-Mono) is built in and the default; installed monospace fonts like JetBrains Mono or Fira Code are offered too.
 
@@ -124,6 +125,8 @@ On Linux and Windows, use Ctrl where the table says ⌘.
 | Key | Action |
 | --- | --- |
 | ⌘O | Open files (each in its own tab) |
+| ⇧⌘O | Open a container's logs |
+| ⇧⌘S | Open a file or container on an SSH host (Tab switches files / containers) |
 | ⌘T / ⌘W | New tab / close tab |
 | ⌃Tab / ⌃⇧Tab, ⇧⌘] / ⇧⌘[ | Next / previous tab |
 | ⌘, | Settings |
@@ -156,6 +159,10 @@ On Linux and Windows, use Ctrl where the table says ⌘.
  ├── session.rs    saves settings, open tabs and recent files between runs
  ├── theme.rs    dark (default) and light palettes
  ├── decorations.rs  own title bar where the desktop draws none (GNOME on Wayland)
+ ├── containers.rs   lists Docker and Podman containers, here or over SSH
+ ├── ssh.rs      runs the ssh client: remote commands, directory listing, ~/.ssh/config hosts
+ ├── stream.rs   copies container logs or a remote `tail -F` into a private temp file
+ ├── picker.rs, remote_picker.rs  the container and SSH pickers
  └── main.rs     app, menus, key bindings
 ```
 
