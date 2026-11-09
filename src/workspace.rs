@@ -1,6 +1,6 @@
-//! The window's root view: one tab per log file or container, the settings
-//! panel, the container picker, and the title bar on desktops that leave it to
-//! the app.
+//! The window's root view: one tab per log file, container or remote file, the
+//! settings panel, the container and SSH pickers, and the title bar on desktops
+//! that leave it to the app.
 //!
 //! The open tabs, recent files and settings are saved to the session file on
 //! every change, and the tabs are reopened on the next start.
@@ -8,21 +8,22 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, KeyDownEvent, MouseButton,
-    MouseDownEvent, PathPromptOptions, Render, SharedString, Subscription, Window, div, prelude::*,
-    px,
+    AnyView, App, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, KeyDownEvent,
+    MouseButton, MouseDownEvent, PathPromptOptions, Render, SharedString, Subscription, Window,
+    div, prelude::*, px,
 };
 
 use crate::{
-    containers::{self, Container, LogStream},
     decorations,
     picker::{ContainerPicker, PickerEvent},
-    session::{self, RecentFiles, Session},
+    remote_picker::RemotePicker,
+    session::{self, RecentFiles, RecentHosts, Session},
     settings::{self, BUNDLED_FONT, MAX_FONT_SIZE, MIN_FONT_SIZE, Settings},
+    stream::{self, LogStream, Source},
     theme::Theme,
     view::{
-        CloseTab, LogView, LogViewEvent, NewTab, NextTab, Open, OpenContainer, OpenSettings,
-        PrevTab, ToggleNewestFirst, ToggleTheme, printable,
+        CloseTab, LogView, LogViewEvent, NewTab, NextTab, Open, OpenContainer, OpenRemote,
+        OpenSettings, PrevTab, ToggleNewestFirst, ToggleTheme, printable,
     },
 };
 
@@ -30,9 +31,52 @@ pub const TABBAR_H: f32 = 32.;
 /// Height of the log view's toolbar, which the settings panel opens below.
 const TOOLBAR_H: f32 = 44.;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PickerKind {
+    Containers,
+    Remote,
+}
+
+/// The picker shown over the tabs.
+enum Picker {
+    Containers(Entity<ContainerPicker>),
+    Remote(Entity<RemotePicker>),
+}
+
+impl Picker {
+    fn kind(&self) -> PickerKind {
+        match self {
+            Picker::Containers(_) => PickerKind::Containers,
+            Picker::Remote(_) => PickerKind::Remote,
+        }
+    }
+
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match self {
+            Picker::Containers(p) => p.read(cx).focus_handle().clone(),
+            Picker::Remote(p) => p.read(cx).focus_handle().clone(),
+        }
+    }
+
+    fn set_error(&self, msg: String, cx: &mut App) {
+        match self {
+            Picker::Containers(p) => p.update(cx, |p, cx| p.set_error(msg, cx)),
+            Picker::Remote(p) => p.update(cx, |p, cx| p.set_error(msg, cx)),
+        }
+    }
+
+    fn view(&self) -> AnyView {
+        match self {
+            Picker::Containers(p) => p.clone().into(),
+            Picker::Remote(p) => p.clone().into(),
+        }
+    }
+}
+
 struct Tab {
     view: Entity<LogView>,
-    /// Set when the tab shows a container's logs; dropping it stops the stream.
+    /// Set when the tab shows a container's logs or a remote file; dropping it
+    /// stops the stream.
     stream: Option<LogStream>,
     _events: Subscription,
 }
@@ -67,7 +111,7 @@ pub struct Workspace {
     settings_open: bool,
     settings_focus: FocusHandle,
     font_choices: Vec<String>,
-    picker: Option<(Entity<ContainerPicker>, Subscription)>,
+    picker: Option<(Picker, Subscription)>,
     window_title: String,
     /// Set while the left button is held on the client-side title bar.
     pub(crate) titlebar_drag: bool,
@@ -101,7 +145,7 @@ impl Workspace {
                 for tab in &mut this.tabs {
                     tab.stream = None;
                 }
-                containers::remove_log_dir();
+                stream::remove_log_dir();
                 async {}
             }),
         };
@@ -146,7 +190,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
-            LogViewEvent::Opened(path) if containers::is_stream_file(path) => cx.notify(),
+            LogViewEvent::Opened(path) if stream::is_stream_file(path) => cx.notify(),
             LogViewEvent::Opened(path) => {
                 session::push_recent(&mut cx.global_mut::<RecentFiles>().0, path);
                 self.save(cx);
@@ -208,52 +252,86 @@ impl Workspace {
         .detach();
     }
 
-    fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.picker.take().is_some() {
+    /// Opens the picker of `kind`, or closes the one that is open. Opening the
+    /// other kind replaces it.
+    fn toggle_picker(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
+        let was = self.picker.take().map(|(picker, _)| picker.kind());
+        if was == Some(kind) {
             self.focus_active(window, cx);
         } else {
             self.settings_open = false;
-            let picker = cx.new(ContainerPicker::new);
-            let events =
-                cx.subscribe_in(&picker, window, |this, _, event, window, cx| match event {
-                    PickerEvent::Picked(container) => this.open_container(container, window, cx),
-                    PickerEvent::Dismissed => this.toggle_picker(window, cx),
-                });
-            window.focus(picker.read(cx).focus_handle());
+            let (picker, events) = match kind {
+                PickerKind::Containers => {
+                    let picker = cx.new(ContainerPicker::new);
+                    let events = cx.subscribe_in(&picker, window, |this, _, e, w, cx| {
+                        this.on_picker_event(e, w, cx)
+                    });
+                    (Picker::Containers(picker), events)
+                }
+                PickerKind::Remote => {
+                    let picker = cx.new(RemotePicker::new);
+                    let events = cx.subscribe_in(&picker, window, |this, _, e, w, cx| {
+                        this.on_picker_event(e, w, cx)
+                    });
+                    (Picker::Remote(picker), events)
+                }
+            };
+            window.focus(&picker.focus_handle(cx));
             self.picker = Some((picker, events));
         }
         cx.notify();
     }
 
-    /// Shows a container's logs: switches to its tab if it is already open,
-    /// otherwise starts streaming them into the current tab if that is empty, or
-    /// into a new tab.
-    fn open_container(
+    fn on_picker_event(
         &mut self,
-        container: &Container,
+        event: &PickerEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let open = self.tabs.iter().position(|tab| {
-            tab.stream.as_ref().is_some_and(|s| {
-                s.container.engine == container.engine && s.container.id == container.id
-            })
-        });
+        match event {
+            PickerEvent::Picked(source) => self.open_source(source, window, cx),
+            PickerEvent::Dismissed => self.close_picker(window, cx),
+        }
+    }
+
+    fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Shows a container's logs or a remote file: switches to its tab if it is
+    /// already open, otherwise starts streaming them into the current tab if
+    /// that is empty, or into a new tab.
+    fn open_source(&mut self, source: &Source, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self
+            .tabs
+            .iter()
+            .position(|tab| tab.stream.as_ref().is_some_and(|s| s.source.same(source)));
         if let Some(i) = open {
             self.picker = None;
             self.activate(i, window, cx);
             return;
         }
-        let stream = match LogStream::start(container) {
+        let stream = match LogStream::start(source) {
             Ok(stream) => stream,
             Err(err) => {
                 if let Some((picker, _)) = &self.picker {
-                    let msg = format!("Could not open the logs of {}: {err}", container.name);
-                    picker.update(cx, |picker, cx| picker.set_error(msg, cx));
+                    let msg = match err.kind() {
+                        std::io::ErrorKind::NotFound if source.host().is_some() => {
+                            "ssh is not installed".to_string()
+                        }
+                        _ => format!("Could not open {}: {err}", source.label()),
+                    };
+                    picker.set_error(msg, cx);
                 }
                 return;
             }
         };
+        if let Some(host) = source.host() {
+            session::push_recent_host(&mut cx.global_mut::<RecentHosts>().0, host);
+        }
         self.picker = None;
         let path = stream.path().to_path_buf();
         let current_is_empty = self
@@ -334,7 +412,7 @@ impl Workspace {
         let mut tabs = Vec::new();
         let mut active = 0;
         for (i, tab) in self.tabs.iter().enumerate() {
-            // Container logs live in temporary files that are gone after a restart.
+            // Streams live in temporary files that are gone after a restart.
             if tab.stream.is_some() {
                 continue;
             }
@@ -350,13 +428,14 @@ impl Workspace {
             tabs,
             active,
             recent: cx.global::<RecentFiles>().0.clone(),
+            recent_hosts: cx.global::<RecentHosts>().0.clone(),
         }
         .save();
     }
 
     fn tab_name(&self, tab: &Tab, cx: &App) -> String {
         if let Some(stream) = &tab.stream {
-            return printable(&stream.container.label());
+            return printable(&stream.source.label());
         }
         match self.tab_path(tab, cx) {
             Some(path) => printable(
@@ -377,9 +456,14 @@ impl Workspace {
             .enumerate()
             .map(|(i, tab)| {
                 let active = i == self.active;
-                let full_path = self
-                    .tab_path(tab, cx)
-                    .map(|path| SharedString::from(printable(&path.to_string_lossy())));
+                let full_path = match &tab.stream {
+                    Some(stream) => {
+                        Some(SharedString::from(printable(&stream.source.description())))
+                    }
+                    None => self
+                        .tab_path(tab, cx)
+                        .map(|path| SharedString::from(printable(&path.to_string_lossy()))),
+                };
                 let t = *t;
                 div()
                     .id(("tab", i))
@@ -676,6 +760,7 @@ impl Render for Workspace {
             (backdrop, self.render_settings(&settings, top, &t, cx))
         });
         let picker = self.picker.as_ref().map(|(picker, _)| {
+            let picker = picker.view();
             let top = decorations::title_bar_height(window) + TABBAR_H + TOOLBAR_H + 24.;
             // Clicking outside the picker closes it.
             div()
@@ -690,10 +775,10 @@ impl Render for Workspace {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.toggle_picker(window, cx)
+                        this.close_picker(window, cx)
                     }),
                 )
-                .child(picker.clone())
+                .child(picker)
         });
         let active = self.tabs[self.active].view.clone();
 
@@ -710,7 +795,10 @@ impl Render for Workspace {
                 .text_sm()
                 .on_action(cx.listener(|this, _: &Open, window, cx| this.prompt_open(window, cx)))
                 .on_action(cx.listener(|this, _: &OpenContainer, window, cx| {
-                    this.toggle_picker(window, cx)
+                    this.toggle_picker(PickerKind::Containers, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &OpenRemote, window, cx| {
+                    this.toggle_picker(PickerKind::Remote, window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                 .on_action(cx.listener(|this, _: &CloseTab, window, cx| {

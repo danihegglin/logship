@@ -1,19 +1,17 @@
-//! Logs of Docker and Podman containers.
+//! Docker and Podman containers, on this computer or on a remote host over
+//! SSH.
 //!
 //! Containers are listed with `<engine> ps -a`, and a container's logs are
-//! streamed with `<engine> logs --follow` into a private temporary file. The tab
-//! then opens that file like any other log, so indexing, search and live tail
-//! work unchanged. Dropping the [`LogStream`] stops the process and deletes the
-//! file.
+//! streamed with `<engine> logs --follow` (see [`crate::stream`]). On a remote
+//! host the same commands run through `ssh`, so only the engine's command line
+//! tool needs to be installed there.
 
 use std::{
-    ffi::OsString,
-    fs::File,
-    io::{BufRead, BufReader, Read, Write},
-    path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    path::PathBuf,
+    process::{Command, Stdio},
 };
+
+use crate::ssh;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Engine {
@@ -62,8 +60,15 @@ impl Engine {
             .unwrap_or_else(|| exe.into())
     }
 
-    fn command(self) -> Command {
+    /// `<engine> <args>`, here or on `host`.
+    fn command(self, host: Option<&str>, args: &[&str]) -> Command {
+        if let Some(host) = host {
+            let mut words = vec![self.name()];
+            words.extend_from_slice(args);
+            return ssh::command(host, &words);
+        }
         let mut cmd = Command::new(self.program());
+        cmd.args(args);
         cmd.stdin(Stdio::null());
         #[cfg(windows)]
         {
@@ -78,6 +83,8 @@ impl Engine {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Container {
     pub engine: Engine,
+    /// The SSH destination the container runs on; `None` for this computer.
+    pub host: Option<String>,
     pub id: String,
     pub name: String,
     pub image: String,
@@ -87,37 +94,66 @@ pub struct Container {
 }
 
 impl Container {
-    /// Tab title, e.g. "docker: web".
+    /// Tab title, e.g. "docker: web" or "web1 docker: web".
     pub fn label(&self) -> String {
-        format!("{}: {}", self.engine.name(), self.name)
+        match &self.host {
+            Some(host) => format!("{host} {}: {}", self.engine.name(), self.name),
+            None => format!("{}: {}", self.engine.name(), self.name),
+        }
+    }
+
+    /// `<engine> logs --follow <id>`. On a remote host it is stopped when
+    /// logship closes the connection.
+    pub fn logs_command(&self) -> Command {
+        match &self.host {
+            Some(host) => ssh::streaming_command(
+                host,
+                &[self.engine.name(), "logs", "--follow", "--", &self.id],
+            ),
+            None => self
+                .engine
+                .command(None, &["logs", "--follow", "--", &self.id]),
+        }
     }
 }
 
 const PS_FORMAT: &str = "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}";
 
-/// Lists the engine's containers, running and stopped. Fails when the tool is
-/// missing or its daemon / machine can't be reached.
-pub fn list(engine: Engine) -> Result<Vec<Container>, String> {
+/// Lists the engine's containers, running and stopped, here or on `host`.
+/// Fails when the tool is missing or its daemon / machine can't be reached.
+pub fn list(engine: Engine, host: Option<&str>) -> Result<Vec<Container>, String> {
     let output = engine
-        .command()
-        .args(["ps", "-a", "--format", PS_FORMAT])
+        .command(host, &["ps", "-a", "--format", PS_FORMAT])
         .output()
         .map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound if host.is_some() => "ssh is not installed".into(),
             std::io::ErrorKind::NotFound => format!("{} is not installed", engine.name()),
             _ => format!("{}: {err}", engine.name()),
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // 255 is ssh failing to connect, not the engine failing.
+        if let (Some(host), Some(255)) = (host, output.status.code()) {
+            return Err(ssh::explain_failure(host, &stderr));
+        }
+        // A shell on the host that can't find the tool says so with 127.
+        if output.status.code() == Some(127) {
+            return Err(format!("{} is not installed", engine.name()));
+        }
         let reason = stderr
             .lines()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("failed");
         return Err(format!("{}: {}", engine.name(), reason.trim()));
     }
-    Ok(parse_ps(engine, &String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_ps(
+        engine,
+        host,
+        &String::from_utf8_lossy(&output.stdout),
+    ))
 }
 
-fn parse_ps(engine: Engine, stdout: &str) -> Vec<Container> {
+fn parse_ps(engine: Engine, host: Option<&str>, stdout: &str) -> Vec<Container> {
     stdout
         .lines()
         .filter_map(|line| {
@@ -134,6 +170,7 @@ fn parse_ps(engine: Engine, stdout: &str) -> Vec<Container> {
             }
             Some(Container {
                 engine,
+                host: host.map(str::to_string),
                 id: id.to_string(),
                 name: if name.is_empty() { id } else { name }.to_string(),
                 image: image.to_string(),
@@ -146,12 +183,29 @@ fn parse_ps(engine: Engine, stdout: &str) -> Vec<Container> {
 
 /// Every engine's containers, running ones first. A container listed by two
 /// engines (Podman's `docker` alias) is shown once. Errors are returned only for
-/// engines that could not list anything.
-pub fn list_all() -> (Vec<Container>, Vec<String>) {
+/// engines that could not list anything. The engines are asked in parallel,
+/// which matters when each one is a round trip to a remote host.
+pub fn list_all(host: Option<&str>) -> (Vec<Container>, Vec<String>) {
     let mut containers: Vec<Container> = Vec::new();
     let mut errors = Vec::new();
-    for engine in Engine::ALL {
-        match list(engine) {
+    let results: Vec<_> = std::thread::scope(|s| {
+        let jobs: Vec<_> = Engine::ALL
+            .map(|engine| s.spawn(move || list(engine, host)))
+            .into_iter()
+            .collect();
+        jobs.into_iter()
+            .map(|job| job.join().unwrap_or_else(|_| Err("failed".into())))
+            .collect()
+    });
+    // Both fail the same way when the host can't be reached; say it once.
+    if host.is_some() && results.iter().all(|r| r.is_err()) {
+        let first = results[0].clone().unwrap_err();
+        if results.iter().all(|r| r.as_ref().unwrap_err() == &first) {
+            return (Vec::new(), vec![first]);
+        }
+    }
+    for result in results {
+        match result {
             Ok(found) => {
                 for c in found {
                     if !containers.iter().any(|o| o.id == c.id) {
@@ -170,173 +224,6 @@ pub fn list_all() -> (Vec<Container>, Vec<String>) {
     (containers, errors)
 }
 
-/// A container's logs being copied into a temporary file.
-pub struct LogStream {
-    pub container: Container,
-    path: PathBuf,
-    child: Child,
-}
-
-impl LogStream {
-    /// Starts `<engine> logs --follow`. Stdout and stderr are copied line by line
-    /// into the same file, in the order they arrive. Logs of a stopped container
-    /// are copied once and the process exits.
-    pub fn start(container: &Container) -> std::io::Result<LogStream> {
-        let path = new_log_file(&container.name)?;
-        let file = Arc::new(Mutex::new(create_private(&path)?));
-        let spawned = container
-            .engine
-            .command()
-            .args(["logs", "--follow", &container.id])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-        let mut child = match spawned {
-            Ok(child) => child,
-            Err(err) => {
-                let _ = std::fs::remove_file(&path);
-                return Err(err);
-            }
-        };
-        if let Some(out) = child.stdout.take() {
-            copy_lines(out, file.clone());
-        }
-        if let Some(err) = child.stderr.take() {
-            copy_lines(err, file);
-        }
-        Ok(LogStream {
-            container: container.clone(),
-            path,
-            child,
-        })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for LogStream {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// Copies whole lines, so lines from stdout and stderr don't get mixed up.
-/// The copy ends when the process exits or is killed. If logship itself goes
-/// away, the pipe closes and the logs process stops on its next write.
-fn copy_lines(from: impl Read + Send + 'static, to: Arc<Mutex<File>>) {
-    std::thread::spawn(move || {
-        let mut reader = BufReader::with_capacity(64 << 10, from);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let Ok(mut file) = to.lock() else { break };
-                    if file.write_all(&line).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-}
-
-/// True for files written by a [`LogStream`] of this process. They are
-/// temporary, so they are kept out of the recent files and the saved session.
-pub fn is_stream_file(path: &Path) -> bool {
-    LOG_DIR
-        .get()
-        .and_then(|dir| dir.as_ref().ok())
-        .is_some_and(|dir| path.starts_with(dir))
-}
-
-/// Removes this process's (by then empty) log directory, at exit.
-pub fn remove_log_dir() {
-    if let Some(Ok(dir)) = LOG_DIR.get() {
-        let _ = std::fs::remove_dir(dir);
-    }
-}
-
-static LOG_DIR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-
-/// A fresh directory, readable by the user only, for this process's streams.
-fn log_dir() -> std::io::Result<&'static Path> {
-    LOG_DIR
-        .get_or_init(|| {
-            let base = std::env::temp_dir();
-            let pid = std::process::id();
-            let mut last_err = String::new();
-            for attempt in 0..100 {
-                let dir = base.join(format!("logship-{pid}-{attempt}"));
-                match create_private_dir(&dir) {
-                    Ok(()) => return Ok(std::fs::canonicalize(&dir).unwrap_or(dir)),
-                    Err(err) => last_err = err.to_string(),
-                }
-            }
-            Err(last_err)
-        })
-        .as_deref()
-        .map_err(|err| std::io::Error::other(format!("no temporary directory: {err}")))
-}
-
-/// A new, unused file name in the log directory, named after the container.
-fn new_log_file(name: &str) -> std::io::Result<PathBuf> {
-    let dir = log_dir()?;
-    let stem: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(64)
-        .collect();
-    let stem = stem.trim_start_matches('.');
-    let stem = if stem.is_empty() { "container" } else { stem };
-    (1..)
-        .map(|n| {
-            let mut file = OsString::from(stem);
-            if n > 1 {
-                file.push(format!("-{n}"));
-            }
-            file.push(".log");
-            dir.join(file)
-        })
-        .find(|p| !p.exists())
-        .ok_or_else(|| std::io::Error::other("no free file name"))
-}
-
-#[cfg(unix)]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    // Not recursive: fails if the directory, or anything planted in its place,
-    // already exists.
-    std::fs::DirBuilder::new().mode(0o700).create(dir)
-}
-
-#[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir(dir)
-}
-
-fn create_private(path: &Path) -> std::io::Result<File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,7 +232,7 @@ mod tests {
     fn parses_docker_ps() {
         let out = "a1b2c3d4e5f6\tweb,proxy/web\tnginx:1.27\trunning\tUp 5 minutes (healthy)\n\
                    0f9e8d7c6b5a\tjob\talpine\texited\tExited (0) 2 hours ago\n\n";
-        let list = parse_ps(Engine::Docker, out);
+        let list = parse_ps(Engine::Docker, None, out);
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "a1b2c3d4e5f6");
         assert_eq!(list[0].name, "web");
@@ -360,73 +247,37 @@ mod tests {
     fn parses_podman_ps() {
         let out = "abc\tdb\tdocker.io/library/postgres:16\tUp 3 hours\tUp 3 hours\n\
                    def\t\tbusybox\tExited (1) 5 seconds ago\tExited (1) 5 seconds ago\n";
-        let list = parse_ps(Engine::Podman, out);
+        let list = parse_ps(Engine::Podman, Some("web1"), out);
         assert!(list[0].running);
         assert!(!list[1].running);
         // A container without a name is shown by its id.
         assert_eq!(list[1].name, "def");
+        assert_eq!(list[0].host.as_deref(), Some("web1"));
+        assert_eq!(list[0].label(), "web1 podman: db");
     }
 
     #[test]
-    fn stream_files_are_private_and_unique() {
-        let a = new_log_file("../../etc/passwd").unwrap();
-        assert!(is_stream_file(&a));
-        assert_eq!(a.parent(), Some(log_dir().unwrap()));
-        create_private(&a).unwrap();
-        let b = new_log_file("../../etc/passwd").unwrap();
-        assert_ne!(a, b);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode(&a), 0o600);
-            assert_eq!(mode(log_dir().unwrap()), 0o700);
-        }
-        std::fs::remove_file(&a).unwrap();
-        assert!(!is_stream_file(Path::new("/var/log/syslog")));
-    }
-
-    /// Streams the output of a short shell command the way `logs --follow` is.
-    #[cfg(unix)]
-    #[test]
-    fn copies_stdout_and_stderr_and_cleans_up() {
-        let path = new_log_file("sh").unwrap();
-        let file = Arc::new(Mutex::new(create_private(&path).unwrap()));
-        let mut child = Command::new("sh")
-            .args(["-c", "echo out; echo err >&2; echo more"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        copy_lines(child.stdout.take().unwrap(), file.clone());
-        copy_lines(child.stderr.take().unwrap(), file);
-        child.wait().unwrap();
-        let container = Container {
-            engine: Engine::Docker,
-            id: "x".into(),
-            name: "sh".into(),
-            image: String::new(),
-            status: String::new(),
-            running: false,
-        };
-        let stream = LogStream {
-            container,
-            path: path.clone(),
-            child,
-        };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut text = String::new();
-        while std::time::Instant::now() < deadline {
-            text = std::fs::read_to_string(&path).unwrap();
-            if text.lines().count() == 3 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let mut lines: Vec<&str> = text.lines().collect();
-        lines.sort();
-        assert_eq!(lines, ["err", "more", "out"]);
-        drop(stream);
-        assert!(!path.exists());
+    fn remote_logs_run_over_ssh() {
+        let mut c = parse_ps(
+            Engine::Docker,
+            Some("me@web1"),
+            "abc\tweb\tnginx\trunning\tUp\n",
+        )
+        .remove(0);
+        let cmd = c.logs_command();
+        assert!(cmd.get_program().to_string_lossy().contains("ssh"));
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let last = args.last().unwrap();
+        assert!(last.ends_with("docker logs --follow -- abc"), "{last}");
+        c.host = None;
+        let cmd = c.logs_command();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["logs", "--follow", "--", "abc"]);
     }
 }

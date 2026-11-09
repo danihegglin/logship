@@ -2,19 +2,22 @@
 //! be opened in a tab, as an alternative to picking a file.
 
 use gpui::{
-    ClickEvent, Context, EventEmitter, FocusHandle, KeyDownEvent, Render, ScrollHandle, Task,
-    Window, div, prelude::*, px,
+    ClickEvent, Context, ElementId, EventEmitter, FocusHandle, KeyDownEvent, Render, ScrollHandle,
+    Stateful, Task, Window, div, prelude::*, px,
 };
 
 use crate::{
     containers::{self, Container},
     index::Level,
     settings::Settings,
+    stream::Source,
+    theme::Theme,
     view::printable,
 };
 
+/// Sent by the container picker and the remote picker.
 pub enum PickerEvent {
-    Picked(Container),
+    Picked(Source),
     Dismissed,
 }
 
@@ -66,7 +69,7 @@ impl ContainerPicker {
         self._refresh = Some(cx.spawn(async move |this, cx| {
             let (containers, errors) = cx
                 .background_executor()
-                .spawn(async move { containers::list_all() })
+                .spawn(async move { containers::list_all(None) })
                 .await;
             this.update(cx, |this, cx| {
                 this.containers = containers;
@@ -89,7 +92,7 @@ impl ContainerPicker {
 
     fn pick(&mut self, i: usize, cx: &mut Context<Self>) {
         if let Some(container) = self.visible().get(i) {
-            cx.emit(PickerEvent::Picked((*container).clone()));
+            cx.emit(PickerEvent::Picked(Source::Container((*container).clone())));
         }
     }
 
@@ -116,77 +119,14 @@ impl ContainerPicker {
 impl Render for ContainerPicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.global::<Settings>().theme();
-        let hover = t.surface_hover;
-        let running_dot = t.level(Level::Info);
         let visible = self.visible();
         let selected = self.selected.min(visible.len().saturating_sub(1));
 
-        let button = |id: &'static str, text: &'static str, active: bool| {
-            div()
-                .id(id)
-                .px_2()
-                .h(px(24.))
-                .flex()
-                .items_center()
-                .rounded_md()
-                .text_xs()
-                .cursor_pointer()
-                .when(active, |d| d.bg(t.surface_hover).text_color(t.text))
-                .when(!active, |d| d.text_color(t.text_muted))
-                .hover(move |s| s.bg(hover))
-                .child(text)
-        };
+        let button =
+            |id: &'static str, text: &'static str, active: bool| button(id, text, active, &t);
 
         let rows = visible.iter().enumerate().map(|(i, c)| {
-            div()
-                .id(("container", i))
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .cursor_pointer()
-                .when(i == selected, |d| d.bg(t.surface_hover))
-                .hover(move |s| s.bg(hover))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(7.))
-                        .rounded_full()
-                        .bg(if c.running { running_dot } else { t.border }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .truncate()
-                                .text_color(t.text)
-                                .child(printable(&c.name)),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(t.text_muted)
-                                .child(printable(&format!("{}  ·  {}", c.image, c.status))),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .px_1()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(t.border)
-                        .text_xs()
-                        .text_color(t.text_muted)
-                        .child(c.engine.name()),
-                )
+            container_row(c, ("container", i).into(), i == selected, &t)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.pick(i, cx)))
         });
 
@@ -282,4 +222,91 @@ impl Render for ContainerPicker {
                     .child("Logs of running containers keep streaming while the tab is open."),
             )
     }
+}
+
+/// One container in a list: a dot that is lit while it runs, its name, image
+/// and status, and the engine.
+pub fn container_row(
+    c: &Container,
+    id: ElementId,
+    selected: bool,
+    t: &Theme,
+) -> Stateful<gpui::Div> {
+    let hover = t.surface_hover;
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_3()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .cursor_pointer()
+        .when(selected, |d| d.bg(t.surface_hover))
+        .hover(move |s| s.bg(hover))
+        .child(
+            div()
+                .flex_none()
+                .size(px(7.))
+                .rounded_full()
+                .bg(if c.running {
+                    t.level(Level::Info)
+                } else {
+                    t.border
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_color(t.text)
+                        .child(printable(&c.name)),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(t.text_muted)
+                        .child(printable(&format!("{}  ·  {}", c.image, c.status))),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .px_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(t.border)
+                .text_xs()
+                .text_color(t.text_muted)
+                .child(c.engine.name()),
+        )
+}
+
+/// A small button in a picker's header; `active` marks the chosen one of a group.
+pub fn button(
+    id: impl Into<ElementId>,
+    text: impl Into<gpui::SharedString>,
+    active: bool,
+    t: &Theme,
+) -> Stateful<gpui::Div> {
+    let hover = t.surface_hover;
+    div()
+        .id(id)
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded_md()
+        .text_xs()
+        .cursor_pointer()
+        .when(active, |d| d.bg(t.surface_hover).text_color(t.text))
+        .when(!active, |d| d.text_color(t.text_muted))
+        .hover(move |s| s.bg(hover))
+        .child(text.into())
 }
