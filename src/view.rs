@@ -1435,7 +1435,11 @@ impl LogView {
                     point(x + px(3.), bounds.origin.y + px(thumb_top)),
                     size(px(w - 6.), px(thumb_h)),
                 );
-                let color = if grab.is_some() { thumb_active } else { thumb_color };
+                let color = if grab.is_some() {
+                    thumb_active
+                } else {
+                    thumb_color
+                };
                 window.paint_quad(fill(thumb, color).corner_radii(px(5.)));
 
                 let top = bounds.origin.y;
