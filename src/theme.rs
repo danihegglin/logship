@@ -20,6 +20,8 @@ pub struct Theme {
     pub current_match_bg: Hsla,
     pub scrollbar_track: Hsla,
     pub scrollbar_thumb: Hsla,
+    /// Thumb while it is being dragged.
+    pub scrollbar_thumb_active: Hsla,
     pub error_text: Hsla,
     levels: [Hsla; Level::COUNT],
 }
@@ -40,8 +42,9 @@ impl Theme {
             row_hover: rgba(0xffffff0a).into(),
             match_bg: rgba(0xe5c07b55).into(),
             current_match_bg: rgba(0xf0a04bcc).into(),
-            scrollbar_track: rgba(0xffffff08).into(),
-            scrollbar_thumb: rgba(0xffffff30).into(),
+            scrollbar_track: rgba(0xffffff0f).into(),
+            scrollbar_thumb: rgba(0xffffff5c).into(),
+            scrollbar_thumb_active: rgba(0xffffff99).into(),
             error_text: rgb(0xf07178).into(),
             levels: [
                 rgb(0x4d535e).into(),
@@ -69,8 +72,9 @@ impl Theme {
             row_hover: rgba(0x0000000a).into(),
             match_bg: rgba(0xf5c54277).into(),
             current_match_bg: rgba(0xf08c2bcc).into(),
-            scrollbar_track: rgba(0x0000000a).into(),
-            scrollbar_thumb: rgba(0x00000033).into(),
+            scrollbar_track: rgba(0x00000012).into(),
+            scrollbar_thumb: rgba(0x0000005c).into(),
+            scrollbar_thumb_active: rgba(0x00000099).into(),
             error_text: rgb(0xc9303b).into(),
             levels: [
                 rgb(0xa0a6b0).into(),
