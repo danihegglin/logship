@@ -65,7 +65,7 @@ actions!(
 
 const HEADER_H: f32 = 44.;
 const STATUS_H: f32 = 26.;
-const SCROLLBAR_W: f32 = 14.;
+const SCROLLBAR_W: f32 = 18.;
 /// Width of the level stripe left of the line numbers.
 const STRIPE_W: f32 = 3.;
 /// Most text a single copy puts on the clipboard.
@@ -1367,9 +1367,11 @@ impl LogView {
         let reversed = self.reversed;
         let entity = cx.entity();
         let grab = self.thumb_grab;
-        let (track, thumb_color, hit_color, warn_color, error_color) = (
+        let (track, edge, thumb_color, thumb_active, hit_color, warn_color, error_color) = (
             t.scrollbar_track,
+            t.border,
             t.scrollbar_thumb,
+            t.scrollbar_thumb_active,
             t.accent,
             t.level(Level::Warn),
             t.level(Level::Error),
@@ -1382,6 +1384,11 @@ impl LogView {
                 let track_h = f32::from(bounds.size.height);
                 let x = bounds.origin.x;
                 let w = f32::from(bounds.size.width);
+                // Hairline on the left so the track reads as its own lane against the rows.
+                window.paint_quad(fill(
+                    gpui::Bounds::new(bounds.origin, size(px(1.), bounds.size.height)),
+                    edge,
+                ));
 
                 // Error/warning/match overview, one pixel row per merged bucket group.
                 let mut by_px = vec![0u8; track_h.max(1.) as usize + 1];
@@ -1429,11 +1436,11 @@ impl LogView {
                     size(px(w - 6.), px(thumb_h)),
                 );
                 let color = if grab.is_some() {
-                    thumb_color.opacity(1.6)
+                    thumb_active
                 } else {
                     thumb_color
                 };
-                window.paint_quad(fill(thumb, color).corner_radii(px(4.)));
+                window.paint_quad(fill(thumb, color).corner_radii(px(5.)));
 
                 let top = bounds.origin.y;
                 let set_from_y = move |this: &mut LogView, y: f32, grab: f32| {
